@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Analytics Charts</title>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" />
+  <link rel="stylesheet" href="style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+</head>
+<body>
+  <div id="login-root"></div>
+  <div id="topbar-root" style="display:none"></div>
+  <main id="page-container" style="display:none"></main>
+
+  <script type="module">
+    import { mountTopbar } from './topbar.js';
+    import { store } from './store.js';
+    import { api } from './api.js';
+    import { toast, el } from './components.js';
+
+    const loginRoot = document.getElementById('login-root');
+    const topbarRoot = document.getElementById('topbar-root');
+    const pageContainer = document.getElementById('page-container');
+
+    async function bootApp() {
+      loginRoot.style.display = 'none';
+      topbarRoot.style.display = '';
+      pageContainer.style.display = '';
+      mountTopbar(topbarRoot);
+      route();
+      window.addEventListener('hashchange', route);
+      pollStatus();
+      setInterval(pollStatus, 10000);
+      loadPrefs();
+    }
+
+    async function loadPrefs() {
+      try {
+        const prefs = await api.preferences();
+        store.preferences = prefs;
+        if (prefs.default_charts?.length) {
+          store.savedCharts = prefs.default_charts;
+        }
+        if (prefs.last_page) {
+          location.hash = '#' + prefs.last_page;
+        }
+      } catch (e) {}
+    }
+
+    // ---- Login screen ----
+    function showLogin() {
+      topbarRoot.style.display = 'none';
+      pageContainer.style.display = 'none';
+      loginRoot.style.display = '';
+      loginRoot.innerHTML = '';
+      const screen = el('div', { class: 'login-screen' });
+      const card = el('div', { class: 'login-card' });
+      const brand = el('div', { class: 'login-brand' },
+        el('span', { class: 'brand-mark' }),
+        el('span', { class: 'brand-name' }, 'Analytics Charts')
+      );
+      const tagline = el('div', { class: 'login-tagline' }, 'Admin login');
+      const userIn = el('input', { type: 'text', placeholder: 'Username' });
+      const passIn = el('input', { type: 'password', placeholder: 'Password' });
+      const err = el('div', { class: 'login-error', style: { display: 'none' } });
+      const btn = el('button', { class: 'btn primary', style: { width: '100%' } }, 'Sign in');
+      const apiInput = el('input', { type: 'text', value: store.apiBase, placeholder: 'http://host:port' });
+
+      async function attempt() {
+        err.style.display = 'none';
+        err.textContent = '';
+        store.apiBase = apiInput.value.replace(/\/+$/, '');
+        try {
+          const res = await api.login(userIn.value, passIn.value);
+          store.adminToken = res.token || res.api_key || '';
+          toast('Signed in', 'success');
+          bootApp();
+        } catch (e) {
+          err.textContent = e.message;
+          err.style.display = '';
+        }
+      }
+
+      btn.addEventListener('click', attempt);
+      passIn.addEventListener('keydown', (e) => { if (e.key === 'Enter') attempt(); });
+      userIn.addEventListener('keydown', (e) => { if (e.key === 'Enter') passIn.focus(); });
+
+      card.appendChild(brand);
+      card.appendChild(tagline);
+      card.appendChild(el('div', { class: 'login-field' }, el('label', {}, 'Username'), userIn));
+      card.appendChild(el('div', { class: 'login-field' }, el('label', {}, 'Password'), passIn));
+      card.appendChild(err);
+      card.appendChild(btn);
+      card.appendChild(el('div', { class: 'login-field mt-12' }, el('label', {}, 'API base'), apiInput));
+      screen.appendChild(card);
+      loginRoot.appendChild(screen);
+    }
+
+    const PAGES = {
+      dashboard: () => import('./pages/dashboard.js'),
+      charts: () => import('./pages/charts.js'),
+      data: () => import('./pages/data.js'),
+      settings: () => import('./pages/settings.js'),
+    };
+    let currentModule = null;
+
+    async function route() {
+      const raw = (location.hash.replace('#', '') || 'dashboard');
+      const page = raw.split('?')[0];
+      const target = PAGES[page] ? page : 'dashboard';
+      store.currentPage = target;
+      if (currentModule?.unmount) try { currentModule.unmount(); } catch (e) {}
+      const container = document.getElementById('page-container');
+      container.innerHTML = '<div class="page"><div class="loading-skeleton" style="height: 200px;"></div></div>';
+      try {
+        const mod = await PAGES[target]();
+        currentModule = mod;
+        await mod.mount(container);
+      } catch (e) {
+        console.error(e);
+        container.innerHTML = `<div class="page"><div class="empty-state"><span class="bear">Failed to load page</span><span class="text-xs mono dim">${e.message}</span></div></div>`;
+      }
+    }
+
+    // global status poll for topbar
+    async function pollStatus() {
+      try {
+        const s = await api.status();
+        store.status = s.service_status || s;
+        store.connected = true;
+      } catch (e) { store.connected = false; }
+    }
+
+    // boot: if token exists try verify, else show login
+    if (store.adminToken) {
+      api.verifyAuth().then(() => bootApp()).catch(() => showLogin());
+    } else {
+      showLogin();
+    }
+  </script>
+</body>
+</html>
