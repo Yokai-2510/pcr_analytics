@@ -2,7 +2,7 @@
 const subs = new Set();
 
 const initial = {
-  apiBase: localStorage.getItem('apiBase') || 'http://3.111.218.114:8000',
+  apiBase: localStorage.getItem('apiBase') || 'https://pcr-analytics.duckdns.org',
   adminToken: localStorage.getItem('adminToken') || '',
   isLoggedIn: !!localStorage.getItem('adminToken'),
   connected: false,
