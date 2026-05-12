@@ -285,12 +285,36 @@ function openEditor(existing) {
   const baselineOptions = (cat.baselines || ['post_settlement', 'prev_close']).map(b => ({ value: b, label: baselineMap[b] || b }));
   const baselineSel = Select({ options: baselineOptions, value: cfg.baseline });
 
-  const modeMap = { aggregate: 'Aggregate', atm_window: 'ATM window', custom: 'Custom strikes', all: 'All strikes' };
+  const modeMap = { aggregate: 'Aggregate (all strikes)', atm_window: 'ATM window', custom: 'Custom strikes', all: 'All strikes (aggregated)' };
+  const modeDesc = {
+    aggregate: 'One line — sums OI across all available strikes.',
+    atm_window: 'Focus on N strikes around ATM. Shows per-strike lines.',
+    custom: 'Pick specific strikes. Shows per-strike lines.',
+    all: 'One line — same as Aggregate, sums across every strike.',
+  };
   const modeOptions = (cat.strike_modes || ['aggregate', 'atm_window', 'custom', 'all']).map(m => ({ value: m, label: modeMap[m] || m }));
-  const strikeModeSel = Select({ options: modeOptions, value: cfg.strike_mode });
 
-  const strikeCountInput = el('input', { type: 'number', min: '0', max: '100', value: cfg.strike_count ?? 5 });
+  const strikeCountInput = el('input', { type: 'number', min: '1', max: '100', value: cfg.strike_count ?? 5 });
   const strikesInput = el('input', { type: 'text', placeholder: '24000, 24100', value: (cfg.strikes || []).join(', ') });
+
+  // Conditional field visibility based on strike mode
+  const modeDescEl = el('div', { class: 'dim text-xs mt-4', style: { lineHeight: '1.4' } }, modeDesc[cfg.strike_mode] || '');
+  const atmCountField = el('div', { class: 'field' }, el('span', { class: 'label' }, 'Strikes each side'), strikeCountInput);
+  const customStrikesField = el('div', { class: 'field' }, el('span', { class: 'label' }, 'Custom strikes'), strikesInput);
+
+  function updateStrikeFields(mode) {
+    modeDescEl.textContent = modeDesc[mode] || '';
+    atmCountField.style.display = mode === 'atm_window' ? '' : 'none';
+    customStrikesField.style.display = mode === 'custom' ? '' : 'none';
+  }
+
+  const strikeModeSel = Select({
+    options: modeOptions,
+    value: cfg.strike_mode,
+    onChange: (v) => updateStrikeFields(v),
+  });
+  updateStrikeFields(cfg.strike_mode);
+
   const typesList = (store.chartTypes || []).map(t => (typeof t === 'string' ? { id: t, label: t } : t));
   const fallbackTypes = ['line', 'area', 'bar', 'candle', 'heatmap', 'scatter', 'histogram'].map(t => ({ id: t, label: t.charAt(0).toUpperCase() + t.slice(1) }));
   const ctOptions = (typesList.length ? typesList : fallbackTypes);
@@ -304,8 +328,9 @@ function openEditor(existing) {
     dateRow,
     field('Baseline', baselineSel),
     field('Strike mode', strikeModeSel),
-    field('ATM count', strikeCountInput),
-    field('Custom strikes', strikesInput),
+    modeDescEl,
+    atmCountField,
+    customStrikesField,
     field('Chart type', chartTypeSel),
   );
 
@@ -337,6 +362,7 @@ function openEditor(existing) {
     chartTypeSel.setValue(c.chart_type || cfg.chart_type);
     strikeCountInput.value = c.strike_count ?? cfg.strike_count;
     strikesInput.value = (c.strikes || []).join(', ');
+    updateStrikeFields(c.strike_mode || cfg.strike_mode);
     metricBox.querySelectorAll('input[type=checkbox]').forEach(cb => { cb.checked = (c.metrics || []).includes(cb.value); });
     if (c.date) { useToday.checked = false; chartDateSelect.setValue(c.date); chartDateSelect.el.style.opacity = '1'; chartDateSelect.el.style.pointerEvents = ''; }
     else { useToday.checked = true; chartDateSelect.el.style.opacity = '0.4'; chartDateSelect.el.style.pointerEvents = 'none'; }
