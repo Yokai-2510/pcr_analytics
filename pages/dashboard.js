@@ -124,7 +124,7 @@ export async function mount(container) {
       setTimeout(() => {
         const c = echarts.init(spark, null, { renderer: 'canvas' });
         sparkCharts[it.instrument] = c;
-        const pts = (it.spark?.spot || []).map((v, i) => [it.spark.timestamps[i], v]);
+        const pts = (it.spark?.spot || []).map((v, i) => [it.spark.timestamps[i].replace(/([+-]\d{2}:\d{2})$/, ''), v]);
         const col = tone === 'bull' ? '#b1ffc2' : '#ff8a9e';
         c.setOption({
           animation: false,
@@ -217,7 +217,7 @@ export async function mount(container) {
           lineStyle: { color: isSpot ? '#ffffff' : '#c6c0ff', width: 1.6 },
           areaStyle: isSpot ? { color: 'rgba(255,255,255,0.03)' } : undefined,
           yAxisIndex: isSpot ? 0 : 1,
-          data: s.points.map(p => [p.timestamp, p.value]),
+          data: s.points.map(p => [p.timestamp.replace(/([+-]\d{2}:\d{2})$/, ''), p.value]),
         };
       });
       featuredChart.setOption({

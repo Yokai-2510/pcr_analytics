@@ -352,14 +352,14 @@ function renderEchart(inst, payload, chartType) {
       lineStyle: { color: s.color, width: 1.5 },
       itemStyle: { color: s.color },
       yAxisIndex: s.axis === 'right' ? 1 : 0,
-      data: (s.points || []).map(p => [p.timestamp, p.value]),
+      data: (s.points || []).map(p => [p.timestamp.replace(/([+-]\d{2}:\d{2})$/, ''), p.value]),
       ...(chartType === 'area' ? { areaStyle: { color: s.color, opacity: 0.15 } } : {})
     }));
   } else if (chartType === 'bar') {
     series = (payload.series || []).map(s => ({
       name: s.label, type: 'bar', itemStyle: { color: s.color },
       yAxisIndex: s.axis === 'right' ? 1 : 0,
-      data: (s.points || []).map(p => [p.timestamp, p.value]),
+      data: (s.points || []).map(p => [p.timestamp.replace(/([+-]\d{2}:\d{2})$/, ''), p.value]),
       stack: /oi/i.test(s.label) ? 'oi' : undefined,
     }));
   } else if (chartType === 'candle') {
@@ -375,7 +375,7 @@ function renderEchart(inst, payload, chartType) {
   } else if (chartType === 'heatmap') {
     const points = []; const strikes = new Set(); const times = new Set();
     (payload.series || []).forEach(s => (s.points || []).forEach(p => {
-      if (p.strike != null) { strikes.add(p.strike); times.add(p.timestamp); points.push([p.timestamp, p.strike, p.value]); }
+      if (p.strike != null) { const ts = p.timestamp.replace(/([+-]\d{2}:\d{2})$/, ''); strikes.add(p.strike); times.add(ts); points.push([ts, p.strike, p.value]); }
     }));
     if (!points.length) { inst.setOption({ title: { text: 'Heatmap requires non-aggregate strike mode', textStyle: { color: '#a0a0aa', fontSize: 12 }, top: 'middle', left: 'center' }, series: [] }, true); return; }
     xAxis = { type: 'category', data: [...times].sort(), ...CHART_AXIS_STYLE };
@@ -385,8 +385,8 @@ function renderEchart(inst, payload, chartType) {
     const s1 = payload.series?.[0]; const s2 = payload.series?.[1];
     if (!s1 || !s2) { inst.setOption({ series: [], title: { text: 'Scatter needs 2 metrics', textStyle: { color: '#a0a0aa' }, top: 'middle', left: 'center' } }, true); return; }
     const byTime = new Map();
-    (s1.points || []).forEach(p => byTime.set(p.timestamp, [p.value, null]));
-    (s2.points || []).forEach(p => { const e = byTime.get(p.timestamp) || [null, null]; e[1] = p.value; byTime.set(p.timestamp, e); });
+    (s1.points || []).forEach(p => byTime.set(p.timestamp.replace(/([+-]\d{2}:\d{2})$/, ''), [p.value, null]));
+    (s2.points || []).forEach(p => { const ts = p.timestamp.replace(/([+-]\d{2}:\d{2})$/, ''); const e = byTime.get(ts) || [null, null]; e[1] = p.value; byTime.set(ts, e); });
     const data = [...byTime.values()].filter(([a, b]) => a != null && b != null);
     xAxis = { type: 'value', scale: true, name: s1.label, ...CHART_AXIS_STYLE };
     yAxis = [{ type: 'value', scale: true, name: s2.label, ...CHART_AXIS_STYLE }];
@@ -425,7 +425,7 @@ function resampleOHLC(points, bucketMs) {
   if (!points.length) return [];
   const out = new Map();
   for (const p of points) {
-    const t = new Date(p.timestamp).getTime();
+    const t = new Date(p.timestamp.replace(/([+-]\d{2}:\d{2})$/, '')).getTime();
     const b = Math.floor(t / bucketMs) * bucketMs;
     const key = new Date(b).toISOString();
     let r = out.get(key);
