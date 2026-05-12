@@ -7,8 +7,6 @@ let mode = localStorage.getItem('charts.mode') || 'tabs';
 let activeTab = null;
 let chartInstances = {};
 let pollTimer = null;
-let _body, _toolbar;
-let _built = false;
 
 const WORKSPACE_PRESETS = ['1×1', '2×1', '2×2', '3×2'];
 
@@ -41,218 +39,190 @@ export async function mount(container) {
   }
   try { store.savedCharts = await api.listCharts(); } catch (e) { store.savedCharts = []; }
 
-  _toolbar = el('div', { class: 'charts-toolbar' });
-  page.appendChild(_toolbar);
+  // single horizontal toolbar row
+  const toolbar = el('div', { class: 'charts-toolbar' });
+  page.appendChild(toolbar);
 
-  _body = el('div', {});
-  page.appendChild(_body);
+  const body = el('div', {});
+  page.appendChild(body);
 
-  buildToolbar();
-  render();
+  function buildToolbar() {
+    toolbar.innerHTML = '';
+    const seg = el('div', { class: 'segmented' },
+      el('button', { class: 'seg' + (mode === 'tabs' ? ' active' : ''), onclick: () => switchMode('tabs') }, 'Tabs'),
+      el('button', { class: 'seg' + (mode === 'workspace' ? ' active' : ''), onclick: () => switchMode('workspace') }, 'Workspace')
+    );
+    toolbar.appendChild(seg);
+
+    if (mode === 'workspace') {
+      const layout = localStorage.getItem('charts.layout') || '2×2';
+      const lyt = el('div', { class: 'segmented' });
+      WORKSPACE_PRESETS.forEach(p => {
+        lyt.appendChild(el('button', {
+          class: 'seg' + (layout === p ? ' active' : ''),
+          onclick: () => { localStorage.setItem('charts.layout', p); buildToolbar(); render(); }
+        }, p));
+      });
+      toolbar.appendChild(lyt);
+    } else {
+      // tab strip inline
+      const strip = el('div', { class: 'tab-strip', style: { flex: '1', minWidth: '0' } });
+      if (!activeTab || !store.savedCharts.find(c => c.id === activeTab)) {
+        activeTab = store.savedCharts[0]?.id || null;
+      }
+      store.savedCharts.forEach(c => {
+        const t = el('div', {
+          class: 'tab-item' + (activeTab === c.id ? ' active' : ''),
+          onclick: (e) => { if (e.target.closest('.close')) return; activeTab = c.id; buildToolbar(); render(); }
+        }, c.name);
+        const closeBtn = el('span', { class: 'close', onclick: async (e) => {
+          e.stopPropagation();
+          if (!confirm(`Delete "${c.name}"?`)) return;
+          try {
+            await api.deleteChart(c.id);
+            store.savedCharts = store.savedCharts.filter(x => x.id !== c.id);
+            if (activeTab === c.id) activeTab = store.savedCharts[0]?.id || null;
+            buildToolbar(); render();
+            toast('Deleted', 'success');
+          } catch (e) {}
+        } });
+        closeBtn.appendChild(icon('close'));
+        t.appendChild(closeBtn);
+        strip.appendChild(t);
+      });
+      toolbar.appendChild(strip);
+    }
+
+    toolbar.appendChild(el('div', { class: 'spacer' }));
+    toolbar.appendChild(el('button', { class: 'btn primary sm', onclick: () => openEditor(null) }, icon('plus'), 'New chart'));
+  }
+
+  function switchMode(next) {
+    mode = next;
+    localStorage.setItem('charts.mode', next);
+    buildToolbar();
+    render();
+  }
+
+  function render() {
+    body.innerHTML = '';
+    Object.values(chartInstances).forEach(c => c.dispose());
+    chartInstances = {};
+    if (mode === 'workspace') renderWorkspace(body);
+    else renderTabs(body);
+  }
+
+  function renderWorkspace(root) {
+    const layout = localStorage.getItem('charts.layout') || '2×2';
+    const [cols, rows] = layout.split('×').map(Number);
+    const grid = el('div', { class: 'workspace-grid', style: { gridTemplateColumns: `repeat(${cols}, 1fr)`, gridTemplateRows: `repeat(${rows}, 1fr)` } });
+    const slots = cols * rows;
+    const charts = store.savedCharts.slice(0, slots);
+    for (let i = 0; i < slots; i++) {
+      const c = charts[i];
+      if (c) grid.appendChild(buildTile(c));
+      else grid.appendChild(el('div', {
+        class: 'tile',
+        style: { display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', color: 'var(--text-dim)' },
+        onclick: () => openEditor(null)
+      }, el('div', { class: 'flex-col gap-8', style: { alignItems: 'center' } }, icon('plus'), 'Add chart')));
+    }
+    root.appendChild(grid);
+  }
+
+  function buildTile(chart) {
+    const tile = el('div', { class: 'tile' });
+    const cfg = chart.config || {};
+    const head = el('div', { class: 'tile-header' });
+    head.appendChild(el('div', {},
+      el('div', { class: 'tile-title' }, chart.name),
+      el('div', { class: 'tile-meta mono' }, `${cfg.instrument || ''} · ${(cfg.metrics || []).join(', ')}`)
+    ));
+    const acts = el('div', { class: 'tile-actions' });
+    acts.appendChild(el('button', { class: 'icon-btn', title: 'Edit', onclick: () => openEditor(chart) }, icon('edit')));
+    acts.appendChild(el('button', { class: 'icon-btn', title: 'Delete', onclick: async () => {
+      if (!confirm('Delete chart?')) return;
+      try { await api.deleteChart(chart.id); savedCharts = savedCharts.filter(c => c.id !== chart.id); buildToolbar(); render(); toast('Deleted', 'success'); } catch (e) {}
+    } }, icon('trash')));
+    head.appendChild(acts);
+    tile.appendChild(head);
+    const canvas = el('div', { class: 'echart', 'data-chart-id': chart.id });
+    tile.appendChild(canvas);
+    setTimeout(() => loadAndRender(canvas, cfg, chart.id), 0);
+    return tile;
+  }
+
+  function renderTabs(root) {
+    const chart = activeTab ? store.savedCharts.find(c => c.id === activeTab) : null;
+    if (!chart) {
+      root.appendChild(el('div', { class: 'empty-state' },
+        el('div', { style: { fontSize: '14px', color: 'var(--text)' } }, store.savedCharts.length ? 'Select a chart' : 'No charts yet'),
+        el('div', {}, store.savedCharts.length ? 'Pick a tab above or create a new chart' : 'Create your first chart to start viewing'),
+        el('button', { class: 'btn primary mt-12', onclick: () => openEditor(null) }, icon('plus'), 'New chart')
+      ));
+      return;
+    }
+    const cfg = chart.config || DEFAULT_CONFIG;
+    const card = el('div', { class: 'chart-full' });
+    const head = el('div', { class: 'row mb-8', style: { justifyContent: 'space-between' } },
+      el('div', {},
+        el('div', { style: { fontSize: '14px', fontWeight: '600' } }, chart.name),
+        el('div', { class: 'tile-meta mono mt-8' }, `${cfg.instrument} · ${cfg.strike_mode} · ${(cfg.metrics || []).join(', ')}`)
+      ),
+      el('div', { class: 'row gap-8' },
+        el('button', { class: 'btn ghost sm', onclick: () => openEditor(chart) }, icon('edit'), 'Edit')
+      )
+    );
+    const canvas = el('div', { class: 'echart', style: { flex: '1', minHeight: '0' }, 'data-chart-id': chart.id });
+    card.appendChild(head);
+    card.appendChild(canvas);
+    root.appendChild(card);
+    setTimeout(() => loadAndRender(canvas, cfg, chart.id), 0);
+  }
+
+  async function loadAndRender(div, cfg, id) {
+    try {
+      const body = {
+        instrument: cfg.instrument,
+        metrics: cfg.metrics?.length ? cfg.metrics : ['pcr'],
+        strike_mode: cfg.strike_mode || 'aggregate',
+        baseline: cfg.baseline || 'post_settlement',
+        strike_count: cfg.strike_count || 0,
+        strikes: cfg.strikes || [],
+        date: cfg.date || undefined,
+      };
+      const payload = await api.chartData(body);
+      const inst = chartInstances[id] || (chartInstances[id] = echarts.init(div, null, { renderer: 'canvas' }));
+      renderEchart(inst, payload, cfg.chart_type || 'line');
+    } catch (e) {
+      div.innerHTML = `<div class="empty-state"><span class="bear">Chart error</span><span class="text-xs mono dim">${e.message}</span></div>`;
+    }
+  }
 
   window.__chartsRender = () => { buildToolbar(); render(); };
-  window.addEventListener('resize', resize);
-  pollTimer = setInterval(() => { refreshCharts(); }, 60000);
-}
-
-function buildToolbar() {
-  _toolbar.innerHTML = '';
-  const seg = el('div', { class: 'segmented' },
-    el('button', { class: 'seg' + (mode === 'tabs' ? ' active' : ''), onclick: () => switchMode('tabs') }, 'Tabs'),
-    el('button', { class: 'seg' + (mode === 'workspace' ? ' active' : ''), onclick: () => switchMode('workspace') }, 'Workspace')
-  );
-  _toolbar.appendChild(seg);
-
-  if (mode === 'workspace') {
-    const layout = localStorage.getItem('charts.layout') || '2×2';
-    const lyt = el('div', { class: 'segmented' });
-    WORKSPACE_PRESETS.forEach(p => {
-      lyt.appendChild(el('button', {
-        class: 'seg' + (layout === p ? ' active' : ''),
-        onclick: () => { localStorage.setItem('charts.layout', p); buildToolbar(); render(); }
-      }, p));
-    });
-    _toolbar.appendChild(lyt);
-  } else {
-    const strip = el('div', { class: 'tab-strip', style: { flex: '1', minWidth: '0' } });
-    if (!activeTab || !store.savedCharts.find(c => c.id === activeTab)) {
-      activeTab = store.savedCharts[0]?.id || null;
-    }
-    store.savedCharts.forEach(c => {
-      const t = el('div', {
-        class: 'tab-item' + (activeTab === c.id ? ' active' : ''),
-        onclick: (e) => { if (e.target.closest('.close')) return; activeTab = c.id; buildToolbar(); render(); }
-      }, c.name);
-      const closeBtn = el('span', { class: 'close', onclick: async (e) => {
-        e.stopPropagation();
-        if (!confirm(`Delete "${c.name}"?`)) return;
-        try {
-          await api.deleteChart(c.id);
-          store.savedCharts = store.savedCharts.filter(x => x.id !== c.id);
-          if (activeTab === c.id) activeTab = store.savedCharts[0]?.id || null;
-          // Clean up disposed instance
-          if (chartInstances[c.id]) { chartInstances[c.id].dispose(); delete chartInstances[c.id]; }
-          buildToolbar(); render();
-          toast('Deleted', 'success');
-        } catch (e) {}
-      } });
-      closeBtn.appendChild(icon('close'));
-      t.appendChild(closeBtn);
-      strip.appendChild(t);
-    });
-    _toolbar.appendChild(strip);
-  }
-
-  _toolbar.appendChild(el('div', { class: 'spacer' }));
-  _toolbar.appendChild(el('button', { class: 'btn primary sm', onclick: () => openEditor(null) }, icon('plus'), 'New chart'));
-}
-
-function switchMode(next) {
-  mode = next;
-  localStorage.setItem('charts.mode', next);
-  // Dispose all chart instances when switching modes
-  Object.values(chartInstances).forEach(c => { try { c.dispose(); } catch {} });
-  chartInstances = {};
-  _built = false;
   buildToolbar();
   render();
+  window.addEventListener('resize', resize);
+  pollTimer = setInterval(() => { refreshData(); }, 60000);
 }
 
-function render() {
-  // Only rebuild DOM if structure changed (mode switch, layout change, tab change)
-  // On poll refresh, just update data via refreshCharts()
-  if (!_built) {
-    _body.innerHTML = '';
-    if (mode === 'workspace') buildWorkspace(_body);
-    else buildTabs(_body);
-    _built = true;
-  }
-}
-
-function buildWorkspace(root) {
-  const layout = localStorage.getItem('charts.layout') || '2×2';
-  const [cols, rows] = layout.split('×').map(Number);
-  const grid = el('div', { class: 'workspace-grid', style: { gridTemplateColumns: `repeat(${cols}, 1fr)`, gridTemplateRows: `repeat(${rows}, 1fr)` } });
-  grid.dataset.mode = 'workspace';
-  const slots = cols * rows;
-  const charts = store.savedCharts.slice(0, slots);
-  for (let i = 0; i < slots; i++) {
-    const c = charts[i];
-    if (c) grid.appendChild(buildTile(c));
-    else grid.appendChild(el('div', {
-      class: 'tile',
-      style: { display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', color: 'var(--text-dim)' },
-      onclick: () => openEditor(null)
-    }, el('div', { class: 'flex-col gap-8', style: { alignItems: 'center' } }, icon('plus'), 'Add chart')));
-  }
-  root.appendChild(grid);
-  // Initial load
-  charts.forEach(c => loadAndRender(c.id, c.config));
-}
-
-function buildTile(chart) {
-  const tile = el('div', { class: 'tile' });
-  tile.dataset.chartId = chart.id;
-  const cfg = chart.config || {};
-  const head = el('div', { class: 'tile-header' });
-  head.appendChild(el('div', {},
-    el('div', { class: 'tile-title' }, chart.name),
-    el('div', { class: 'tile-meta mono' }, `${cfg.instrument || ''} · ${(cfg.metrics || []).join(', ')}`)
-  ));
-  const acts = el('div', { class: 'tile-actions' });
-  acts.appendChild(el('button', { class: 'icon-btn', title: 'Edit', onclick: () => openEditor(chart) }, icon('edit')));
-  acts.appendChild(el('button', { class: 'icon-btn', title: 'Delete', onclick: async () => {
-    if (!confirm('Delete chart?')) return;
-    try {
-      await api.deleteChart(chart.id);
-      store.savedCharts = store.savedCharts.filter(c => c.id !== chart.id);
-      if (chartInstances[chart.id]) { chartInstances[chart.id].dispose(); delete chartInstances[chart.id]; }
-      _built = false;
-      buildToolbar(); render();
-      toast('Deleted', 'success');
-    } catch (e) {}
-  } }, icon('trash')));
-  head.appendChild(acts);
-  tile.appendChild(head);
-  const canvas = el('div', { class: 'echart' });
-  canvas.dataset.chartId = chart.id;
-  tile.appendChild(canvas);
-  return tile;
-}
-
-function buildTabs(root) {
-  const chart = activeTab ? store.savedCharts.find(c => c.id === activeTab) : null;
-  if (!chart) {
-    root.appendChild(el('div', { class: 'empty-state' },
-      el('div', { style: { fontSize: '14px', color: 'var(--text)' } }, store.savedCharts.length ? 'Select a chart' : 'No charts yet'),
-      el('div', {}, store.savedCharts.length ? 'Pick a tab above or create a new chart' : 'Create your first chart to start viewing'),
-      el('button', { class: 'btn primary mt-12', onclick: () => openEditor(null) }, icon('plus'), 'New chart')
-    ));
-    return;
-  }
-  const cfg = chart.config || DEFAULT_CONFIG;
-  const card = el('div', { class: 'chart-full' });
-  card.dataset.chartId = chart.id;
-  const head = el('div', { class: 'row mb-8', style: { justifyContent: 'space-between' } },
-    el('div', {},
-      el('div', { style: { fontSize: '14px', fontWeight: '600' } }, chart.name),
-      el('div', { class: 'tile-meta mono mt-8' }, `${cfg.instrument} · ${cfg.strike_mode} · ${(cfg.metrics || []).join(', ')}`)
-    ),
-    el('div', { class: 'row gap-8' },
-      el('button', { class: 'btn ghost sm', onclick: () => openEditor(chart) }, icon('edit'), 'Edit')
-    )
-  );
-  const canvas = el('div', { class: 'echart', style: { flex: '1', minHeight: '0' } });
-  canvas.dataset.chartId = chart.id;
-  card.appendChild(head);
-  card.appendChild(canvas);
-  root.appendChild(card);
-  loadAndRender(chart.id, cfg);
-}
-
-// ---- Load data and render/update chart ----
-async function loadAndRender(chartId, cfg) {
-  try {
-    const body = {
-      instrument: cfg.instrument,
-      metrics: cfg.metrics?.length ? cfg.metrics : ['pcr'],
-      strike_mode: cfg.strike_mode || 'aggregate',
-      baseline: cfg.baseline || 'post_settlement',
-      strike_count: cfg.strike_count || 0,
-      strikes: cfg.strikes || [],
-      date: cfg.date || undefined,
-    };
-    const payload = await api.chartData(body);
-
-    // Find the canvas element for this chart
-    const canvasEl = _body.querySelector(`[data-chart-id="${chartId}"].echart`);
-    if (!canvasEl) return;
-
-    if (chartInstances[chartId]) {
-      // Reuse existing instance
-      renderEchart(chartInstances[chartId], payload, cfg.chart_type || 'line');
-    } else {
-      // Create new instance
-      const inst = echarts.init(canvasEl, null, { renderer: 'canvas' });
-      chartInstances[chartId] = inst;
-      renderEchart(inst, payload, cfg.chart_type || 'line');
+// Refresh data for existing charts without rebuilding DOM
+function refreshData() {
+  if (mode === 'workspace') {
+    const layout = localStorage.getItem('charts.layout') || '2×2';
+    const [cols, rows] = layout.split('×').map(Number);
+    const charts = store.savedCharts.slice(0, cols * rows);
+    charts.forEach(c => {
+      const div = body.querySelector(`.echart[data-chart-id="${c.id}"]`);
+      if (div) loadAndRender(div, c.config, c.id);
+    });
+  } else if (activeTab) {
+    const chart = store.savedCharts.find(c => c.id === activeTab);
+    if (chart) {
+      const div = body.querySelector(`.echart[data-chart-id="${chart.id}"]`);
+      if (div) loadAndRender(div, chart.config, chart.id);
     }
-  } catch (e) {
-    const canvasEl = _body.querySelector(`[data-chart-id="${chartId}"].echart`);
-    if (canvasEl) canvasEl.innerHTML = `<div class="empty-state"><span class="bear">Chart error</span><span class="text-xs mono dim">${e.message}</span></div>`;
   }
-}
-
-// Refresh data for all visible charts without DOM rebuild
-function refreshCharts() {
-  const charts = mode === 'workspace' ? store.savedCharts.slice(0, getSlotCount()) : (activeTab ? [store.savedCharts.find(c => c.id === activeTab)].filter(Boolean) : []);
-  charts.forEach(c => loadAndRender(c.id, c.config));
-}
-
-function getSlotCount() {
-  const layout = localStorage.getItem('charts.layout') || '2×2';
-  const [cols, rows] = layout.split('×').map(Number);
-  return cols * rows;
 }
 
 function resize() {
@@ -260,11 +230,10 @@ function resize() {
 }
 
 export function unmount() {
-  Object.values(chartInstances).forEach(c => { try { c.dispose(); } catch {} });
+  Object.values(chartInstances).forEach(c => c.dispose());
   chartInstances = {};
   window.removeEventListener('resize', resize);
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
-  _built = false;
 }
 
 // ---- compact editor modal: 2 side-by-side panels ----
@@ -378,10 +347,6 @@ function openEditor(existing) {
             toast('Created', 'success');
           }
           store.savedCharts = await api.listCharts();
-          // Dispose old instances for clean rebuild
-          Object.values(chartInstances).forEach(c => { try { c.dispose(); } catch {} });
-          chartInstances = {};
-          _built = false;
           window.dispatchEvent(new CustomEvent('charts:refresh'));
           m.close();
         } catch (e) {}
@@ -429,8 +394,7 @@ function renderEchart(inst, payload, chartType) {
   } else if (chartType === 'heatmap') {
     const points = []; const strikes = new Set(); const times = new Set();
     (payload.series || []).forEach(s => (s.points || []).forEach(p => {
-      const ts = p.timestamp.replace(/([+-]\d{2}:\d{2})$/, '');
-      if (p.strike != null) { strikes.add(p.strike); times.add(ts); points.push([ts, p.strike, p.value]); }
+      if (p.strike != null) { const ts = p.timestamp.replace(/([+-]\d{2}:\d{2})$/, ''); strikes.add(p.strike); times.add(ts); points.push([ts, p.strike, p.value]); }
     }));
     if (!points.length) { inst.setOption({ title: { text: 'Heatmap requires non-aggregate strike mode', textStyle: { color: '#a0a0aa', fontSize: 12 }, top: 'middle', left: 'center' }, series: [] }, true); return; }
     xAxis = { type: 'category', data: [...times].sort(), ...CHART_AXIS_STYLE };
@@ -491,13 +455,5 @@ function resampleOHLC(points, bucketMs) {
 }
 
 window.addEventListener('charts:refresh', async () => {
-  try {
-    store.savedCharts = await api.listCharts();
-    // Rebuild on structural changes (new/deleted chart)
-    Object.values(chartInstances).forEach(c => { try { c.dispose(); } catch {} });
-    chartInstances = {};
-    _built = false;
-    buildToolbar();
-    render();
-  } catch (e) {}
+  try { const list = await api.listCharts(); store.savedCharts = list; window.__chartsRender && window.__chartsRender(); } catch (e) {}
 });
