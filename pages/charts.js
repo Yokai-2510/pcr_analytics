@@ -1,5 +1,5 @@
 // pages/charts.js — workspace (grids up to 3x2) + tabs (1x1 fullview each)
-import { el, toast, modal, icon, CHART_AXIS_STYLE, Select } from '../components.js';
+import { el, toast, modal, icon, CHART_AXIS_STYLE, Select, DateSelect } from '../components.js';
 import { api } from '../api.js';
 import { store } from '../store.js';
 
@@ -247,16 +247,39 @@ function openEditor(existing) {
   );
 
   const instOptions = ['nifty', 'banknifty', 'sensex'].map(i => ({ value: i, label: i.toUpperCase() }));
-  const instSel = Select({ options: instOptions, value: cfg.instrument });
+  const instSel = Select({ options: instOptions, value: cfg.instrument, onChange: (v) => {
+    chartDateSelect.refresh(v);
+  } });
 
   const today = new Date().toISOString().slice(0, 10);
   const useToday = el('input', { type: 'checkbox', checked: !cfg.date });
-  const dateInput = el('input', { type: 'date', value: cfg.date || today, disabled: !cfg.date });
+
+  // DateSelect for chart editor — shows available dates in a menu box
+  const chartDateSelect = DateSelect({
+    instrument: cfg.instrument,
+    apiDistinctFn: async (ins) => {
+      try {
+        const res = await api.dataDistinct('date', `?instrument=${ins}&limit=5000`);
+        return (res.values || []).filter(Boolean);
+      } catch { return []; }
+    },
+    placeholder: 'Today (live)',
+    width: '150px',
+  });
+  if (cfg.date) chartDateSelect.setValue(cfg.date);
+
   const dateRow = el('div', { class: 'field' },
     el('span', { class: 'label' }, 'Date'),
-    el('label', { class: 'row gap-8', style: { alignItems: 'center' } }, useToday, 'Today', dateInput)
+    el('label', { class: 'row gap-8', style: { alignItems: 'center', flexWrap: 'wrap' } }, useToday, 'Today (live)', chartDateSelect.el)
   );
-  useToday.addEventListener('change', () => { dateInput.disabled = useToday.checked; });
+  useToday.addEventListener('change', () => {
+    chartDateSelect.el.style.opacity = useToday.checked ? '0.4' : '1';
+    chartDateSelect.el.style.pointerEvents = useToday.checked ? 'none' : '';
+  });
+  if (useToday.checked) {
+    chartDateSelect.el.style.opacity = '0.4';
+    chartDateSelect.el.style.pointerEvents = 'none';
+  }
 
   const baselineMap = { post_settlement: 'Post settlement', prev_close: 'Previous close', market_open: 'Market open' };
   const baselineOptions = (cat.baselines || ['post_settlement', 'prev_close']).map(b => ({ value: b, label: baselineMap[b] || b }));
@@ -315,6 +338,9 @@ function openEditor(existing) {
     strikeCountInput.value = c.strike_count ?? cfg.strike_count;
     strikesInput.value = (c.strikes || []).join(', ');
     metricBox.querySelectorAll('input[type=checkbox]').forEach(cb => { cb.checked = (c.metrics || []).includes(cb.value); });
+    if (c.date) { useToday.checked = false; chartDateSelect.setValue(c.date); chartDateSelect.el.style.opacity = '1'; chartDateSelect.el.style.pointerEvents = ''; }
+    else { useToday.checked = true; chartDateSelect.el.style.opacity = '0.4'; chartDateSelect.el.style.pointerEvents = 'none'; }
+    chartDateSelect.refresh(c.instrument || cfg.instrument);
   });
 
   const wrap = el('div', {},
@@ -332,7 +358,7 @@ function openEditor(existing) {
           baseline: baselineSel.getValue(),
           strike_mode: strikeModeSel.getValue(),
           chart_type: chartTypeSel.getValue(),
-          date: useToday.checked ? undefined : (dateInput.value || undefined),
+          date: useToday.checked ? undefined : (chartDateSelect.getValue() || undefined),
           strike_count: Number(strikeCountInput.value || 0),
           strikes: strikesInput.value.split(',').map(s => s.trim()).filter(Boolean).map(Number),
           metrics: [...metricBox.querySelectorAll('input[type=checkbox]:checked')].map(i => i.value),

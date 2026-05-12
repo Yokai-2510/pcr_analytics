@@ -285,6 +285,51 @@ export function serializeWeekdays(days) {
   return idxs.map(i => WEEKDAY_ORDER[i]).join(',');
 }
 
+// ---- DateSelect: menu-box date picker populated from API distinct values ----
+// apiDistinctFn: async (instrument) => string[] of available dates
+// Returns { el, getValue, setValue, refresh }
+export function DateSelect({ instrument = 'nifty', apiDistinctFn, onChange, placeholder = 'Select date…', width } = {}) {
+  let currentValue = '';
+  let availableDates = [];
+  let loading = false;
+
+  const sel = Select({ options: [], value: null, placeholder, onChange: (v) => {
+    currentValue = v;
+    if (typeof onChange === 'function') onChange(v);
+  }, width: width || '160px' });
+
+  async function refresh(ins) {
+    if (loading) return;
+    loading = true;
+    try {
+      const dates = await apiDistinctFn(ins || instrument);
+      availableDates = (dates || []).sort().reverse();
+      sel.setOptions(availableDates.map(d => ({ value: d, label: d })));
+      if (currentValue && availableDates.includes(currentValue)) {
+        sel.setValue(currentValue);
+      } else if (availableDates.length) {
+        currentValue = availableDates[0];
+        sel.setValue(currentValue);
+        if (typeof onChange === 'function') onChange(currentValue);
+      }
+    } catch (e) {
+      console.error('DateSelect refresh failed', e);
+    }
+    loading = false;
+  }
+
+  // initial load
+  refresh(instrument);
+
+  return {
+    el: sel.el,
+    getValue: () => currentValue,
+    setValue: (v) => { currentValue = v; sel.setValue(v); },
+    refresh: (ins) => refresh(ins),
+    getAvailableDates: () => [...availableDates],
+  };
+}
+
 // ---- echarts dark theme baseline ----
 export const ECHART_THEME = {
   backgroundColor: 'transparent',
