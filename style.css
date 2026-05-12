@@ -833,7 +833,7 @@ table.data tbody tr:hover { background: var(--surface-1); }
 /* ---- OI Summary ---- */
 .oi-summary-cards {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: 1fr 1fr;
   gap: 12px;
   margin-bottom: 12px;
 }
@@ -843,11 +843,8 @@ table.data tbody tr:hover { background: var(--surface-1); }
   gap: 4px;
   padding: 14px 16px;
 }
-@media (max-width: 1100px) {
-  .oi-summary-cards { grid-template-columns: repeat(3, 1fr); }
-}
 @media (max-width: 720px) {
-  .oi-summary-cards { grid-template-columns: 1fr 1fr; }
+  .oi-summary-cards { grid-template-columns: 1fr; }
 }
 
 .data-grid-wrap {

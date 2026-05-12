@@ -133,8 +133,41 @@ async function renderSnapshots(root) {
 
   root.appendChild(toolbar);
 
-  // ── Filter chips row ──
+  // ── Filter chips + nav buttons in one row ──
   const filterRow = el('div', { class: 'filter-chips-row' });
+  const rowCounter = el('span', { class: 'mono text-xs dim', style: { marginLeft: 'auto' } });
+
+  function scrollToRow(which) {
+    const tbody = table.querySelector('tbody');
+    if (!tbody) return;
+    const rows = tbody.querySelectorAll('tr');
+    if (!rows.length) return;
+    let targetRow;
+    if (which === 'first') targetRow = rows[0];
+    else if (which === 'last') targetRow = rows[rows.length - 1];
+    else {
+      const now = new Date();
+      let bestDiff = Infinity;
+      rows.forEach(r => {
+        const cells = r.querySelectorAll('td');
+        for (const cell of cells) {
+          const text = cell.textContent.trim();
+          if (/^\d{2}:\d{2}:\d{2}/.test(text)) {
+            const parts = text.split(':');
+            const rowMin = parseInt(parts[0]) * 60 + parseInt(parts[1]);
+            const nowMin = now.getHours() * 60 + now.getMinutes();
+            const diff = Math.abs(rowMin - nowMin);
+            if (diff < bestDiff) { bestDiff = diff; targetRow = r; }
+          }
+        }
+      });
+      if (!targetRow) targetRow = rows[0];
+    }
+    targetRow.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    targetRow.style.background = 'rgba(198,192,255,0.12)';
+    setTimeout(() => { targetRow.style.background = ''; }, 1500);
+  }
+
   function renderFilterChips() {
     filterRow.innerHTML = '';
     if (filters.length) {
@@ -146,24 +179,17 @@ async function renderSnapshots(root) {
     filterRow.appendChild(el('button', { class: 'btn ghost sm', onclick: () => openFilterDialog((f) => { filters.push(f); renderSnapshots(root); }) }, icon('plus'), 'Filter'));
     filterRow.appendChild(el('button', { class: 'btn ghost sm', onclick: () => openColumnsDialog(() => renderSnapshots(root)) }, 'Columns'));
     filterRow.appendChild(el('button', { class: 'btn ghost sm', onclick: runQuery, title: 'Reload' }, icon('refresh')));
+    // Nav buttons inline
+    filterRow.appendChild(el('div', { style: { width: '1px', height: '16px', background: 'var(--border)', margin: '0 4px' } }));
+    filterRow.appendChild(el('button', { class: 'btn ghost sm', onclick: () => scrollToRow('first') }, '⏮'));
+    filterRow.appendChild(el('button', { class: 'btn ghost sm', onclick: () => scrollToRow('current') }, '⏱'));
+    filterRow.appendChild(el('button', { class: 'btn ghost sm', onclick: () => scrollToRow('last') }, '⏭'));
+    filterRow.appendChild(rowCounter);
     filterRow.appendChild(el('div', { class: 'spacer' }));
     filterRow.appendChild(el('button', { class: 'btn secondary sm', onclick: exportCSV }, 'Export CSV'));
   }
   renderFilterChips();
   root.appendChild(filterRow);
-
-  // ── Navigation: scroll to first / last / current ──
-  const navBar = el('div', { class: 'data-nav-bar' });
-  const scrollToFirstBtn = el('button', { class: 'btn ghost sm', onclick: () => scrollToRow('first') }, '⏮ First');
-  const scrollToLastBtn = el('button', { class: 'btn ghost sm', onclick: () => scrollToRow('last') }, 'Last ⏭');
-  const scrollToCurrentBtn = el('button', { class: 'btn ghost sm', onclick: () => scrollToRow('current') }, '⏱ Current');
-  navBar.appendChild(scrollToFirstBtn);
-  navBar.appendChild(scrollToLastBtn);
-  navBar.appendChild(scrollToCurrentBtn);
-  navBar.appendChild(el('div', { class: 'spacer' }));
-  const rowCounter = el('span', { class: 'mono text-xs dim' });
-  navBar.appendChild(rowCounter);
-  root.appendChild(navBar);
 
   // ── Table ──
   const tableWrap = el('div', { class: 'data-grid-wrap', id: 'snap-table-wrap' });
@@ -616,7 +642,7 @@ async function renderOiSummary(root) {
   bar.appendChild(refreshBtn);
   root.appendChild(bar);
 
-  // Summary cards
+  // Summary cards — 2 compact cards instead of 5
   const summaryCards = el('div', { class: 'oi-summary-cards' });
   root.appendChild(summaryCards);
 
@@ -638,8 +664,8 @@ async function renderOiSummary(root) {
     summaryCards.innerHTML = '';
 
     try {
-      // Fetch total OI data
-      const oiData = await api.totalOi(instrument);
+      // Fetch total OI data WITH date parameter
+      const oiData = await api.totalOi(instrument, date);
       const rows = Array.isArray(oiData) ? oiData : (oiData.data || oiData.rows || []);
 
       if (!rows.length) {
@@ -675,22 +701,31 @@ async function renderOiSummary(root) {
 
       const summaryRows = [...timeBuckets.values()].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
 
-      // Summary cards
+      // Summary cards — 2 compact cards
       const latest = summaryRows[summaryRows.length - 1];
       const first = summaryRows[0];
       const pcr = latest.total_pe_oi && latest.total_ce_oi ? (latest.total_pe_oi / latest.total_ce_oi) : 0;
+      const ceChange = latest.total_ce_oi - first.total_ce_oi;
+      const peChange = latest.total_pe_oi - first.total_pe_oi;
 
-      const makeCard = (label, value, sub, tone) => el('div', { class: 'card oi-card' },
-        el('div', { class: 'label' }, label),
-        el('div', { class: `mono ${tone || ''}`, style: { fontSize: '18px', fontWeight: 600 } }, value),
-        sub ? el('div', { class: 'mono text-xs dim' }, sub) : null,
+      const makeCard = (title, items) => el('div', { class: 'card oi-card', style: { display: 'flex', flexDirection: 'column', gap: '8px' } },
+        el('div', { class: 'label', style: { marginBottom: '2px' } }, title),
+        ...items.map(item => el('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' } },
+          el('span', { class: 'text-xs muted' }, item.label),
+          el('span', { class: `mono ${item.tone || ''}`, style: { fontSize: '15px', fontWeight: '600' } }, item.value),
+        )),
       );
 
-      summaryCards.appendChild(makeCard('Total CE OI', fmtCompact(latest.total_ce_oi), `${summaryRows.length} intervals`));
-      summaryCards.appendChild(makeCard('Total PE OI', fmtCompact(latest.total_pe_oi), `${latest.strikes?.size || 0} strikes`));
-      summaryCards.appendChild(makeCard('PCR (PE/CE)', fmtNum(pcr, 3), '', pcr >= 1 ? 'bull' : 'bear'));
-      summaryCards.appendChild(makeCard('CE Change', fmtCompact(latest.total_ce_oi - first.total_ce_oi), 'first→last', (latest.total_ce_oi - first.total_ce_oi) >= 0 ? 'bull' : 'bear'));
-      summaryCards.appendChild(makeCard('PE Change', fmtCompact(latest.total_pe_oi - first.total_pe_oi), 'first→last', (latest.total_pe_oi - first.total_pe_oi) >= 0 ? 'bull' : 'bear'));
+      summaryCards.appendChild(makeCard('OI Overview', [
+        { label: 'CE OI', value: fmtCompact(latest.total_ce_oi) },
+        { label: 'PE OI', value: fmtCompact(latest.total_pe_oi) },
+        { label: 'PCR', value: fmtNum(pcr, 3), tone: pcr >= 1 ? 'bull' : 'bear' },
+      ]));
+      summaryCards.appendChild(makeCard('OI Change (first → last)', [
+        { label: 'CE Δ', value: (ceChange >= 0 ? '+' : '') + fmtCompact(ceChange), tone: ceChange >= 0 ? 'bull' : 'bear' },
+        { label: 'PE Δ', value: (peChange >= 0 ? '+' : '') + fmtCompact(peChange), tone: peChange >= 0 ? 'bull' : 'bear' },
+        { label: 'Intervals', value: String(summaryRows.length), tone: 'dim' },
+      ]));
 
       // Build table
       table.innerHTML = '';
