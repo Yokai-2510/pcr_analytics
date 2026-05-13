@@ -210,7 +210,7 @@ export async function mount(container) {
       _utilEls.error,
       el('div', { style: { display: 'flex', gap: '8px', marginTop: 'auto' } },
         el('button', { class: 'btn ghost sm', onclick: () => { location.hash = '#settings'; } }, 'Configure'),
-        el('button', { class: 'btn ghost sm', onclick: () => { location.hash = '#data?tab=events'; } }, 'View events'),
+        el('button', { class: 'btn ghost sm', onclick: () => { location.hash = '#data'; } }, 'View data'),
       )
     );
     utilRow.appendChild(svcCard);
