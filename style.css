@@ -853,7 +853,9 @@ table.data tbody tr:hover { background: var(--surface-1); }
   overflow: auto;
   background: var(--surface-1);
   backdrop-filter: blur(12px);
-  max-height: calc(100vh - 300px);
+  max-height: calc(100vh - 220px);
+  position: relative;
+  z-index: 1;
 }
 .pagination {
   display: flex;
@@ -1033,6 +1035,9 @@ table.data tbody tr:hover { background: var(--surface-1); }
   border-radius: var(--r-lg);
   padding: 10px 12px;
   margin-bottom: 8px;
+  position: relative;
+  z-index: 10;
+  overflow: visible;
 }
 
 .data-controls {
@@ -1040,6 +1045,7 @@ table.data tbody tr:hover { background: var(--surface-1); }
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+  overflow: visible;
 }
 
 .data-field {

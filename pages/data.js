@@ -13,7 +13,7 @@ let showOiSummary = false;
 
 const state = {
   instrument: 'nifty',
-  date: '',
+  date: new Date().toISOString().slice(0, 10),
   page: 1,
   page_size: 100,
   sort: [{ column: 'timestamp', dir: 'desc' }],
@@ -23,8 +23,12 @@ const state = {
 async function fetchAvailableDates(instrument) {
   try {
     const res = await api.dataDistinct('date', `?instrument=${instrument}&limit=5000`);
-    return (res.values || []).filter(Boolean);
-  } catch { return []; }
+    const dates = (res.values || []).filter(Boolean);
+    // Ensure today is always in the list
+    const today = new Date().toISOString().slice(0, 10);
+    if (!dates.includes(today)) dates.unshift(today);
+    return dates.sort().reverse();
+  } catch { return [new Date().toISOString().slice(0, 10)]; }
 }
 
 function resampleData(rows) {
