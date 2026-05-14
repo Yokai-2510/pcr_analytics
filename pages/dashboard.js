@@ -133,7 +133,7 @@ export async function mount(container) {
         fmtSigned(it.pe_oi_change, 0) === '—' ? '—' : (it.pe_oi_change >= 0 ? '+' : '') + fmtCompact(it.pe_oi_change));
 
       const deltaPcr = it.delta_pcr ?? null;
-      const deltaPcrTone = deltaPcr != null ? (deltaPcr >= 1 ? 'bull' : 'bear') : '';
+      const deltaPcrTone = deltaPcr != null ? (deltaPcr >= 0 ? 'bull' : 'bear') : '';
       const deltaPcrVal = el('div', { class: `mono ${deltaPcrTone}`, style: { fontSize: '15px', fontWeight: 600 } }, deltaPcr != null ? fmtNum(deltaPcr, 3) : '—');
 
       card.appendChild(el('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' } },
@@ -141,9 +141,17 @@ export async function mount(container) {
         el('div', {}, el('div', { style: { fontSize: '10px', color: 'var(--text-muted)' } }, 'Put OI'), peOi, peChange)
       ));
 
+      // PCR change from previous close: current PCR − previous close PCR
+      const prevCeOi = (it.total_ce_oi ?? 0) - (it.ce_oi_change ?? 0);
+      const prevPeOi = (it.total_pe_oi ?? 0) - (it.pe_oi_change ?? 0);
+      const prevPcr = (prevCeOi > 0 && prevPeOi > 0) ? (prevPeOi / prevCeOi) : null;
+      const pcrChange = (prevPcr != null && it.pcr != null) ? (it.pcr - prevPcr) : deltaPcr;
+      const pcrChangeTone = pcrChange != null ? (pcrChange >= 0 ? 'bull' : 'bear') : '';
+      const pcrChangeEl = el('div', { class: `mono ${pcrChangeTone}`, style: { fontSize: '15px', fontWeight: 600 } }, pcrChange != null ? (pcrChange >= 0 ? '+' : '') + fmtNum(pcrChange, 3) : '—');
+
       card.appendChild(el('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: '10px', borderTop: '1px solid var(--border)' } },
         el('span', { style: { fontSize: '10px', color: 'var(--text-muted)', fontWeight: 500 } }, 'PCR w.r.t OI Δ'),
-        deltaPcrVal
+        pcrChangeEl
       ));
 
       const spark = el('div', { style: { height: '50px', marginTop: '4px', marginInline: '-4px' } });
@@ -175,11 +183,14 @@ export async function mount(container) {
       refs.peChange.className = `mono ${it.pe_oi_change >= 0 ? 'bull' : 'bear'}`;
       refs.peChange.textContent = fmtSigned(it.pe_oi_change, 0) === '—' ? '—' : (it.pe_oi_change >= 0 ? '+' : '') + fmtCompact(it.pe_oi_change);
 
-      // PCR w.r.t OI change
-      const deltaPcr = it.delta_pcr ?? null;
-      const deltaPcrTone = deltaPcr != null ? (deltaPcr >= 1 ? 'bull' : 'bear') : '';
-      refs.deltaPcrVal.className = `mono ${deltaPcrTone}`;
-      refs.deltaPcrVal.textContent = deltaPcr != null ? fmtNum(deltaPcr, 3) : '—';
+      // PCR w.r.t OI change: current PCR − previous close PCR
+      const prevCeOi = (it.total_ce_oi ?? 0) - (it.ce_oi_change ?? 0);
+      const prevPeOi = (it.total_pe_oi ?? 0) - (it.pe_oi_change ?? 0);
+      const prevPcr = (prevCeOi > 0 && prevPeOi > 0) ? (prevPeOi / prevCeOi) : null;
+      const pcrChange = (prevPcr != null && it.pcr != null) ? (it.pcr - prevPcr) : it.delta_pcr;
+      const pcrChangeTone = pcrChange != null ? (pcrChange >= 0 ? 'bull' : 'bear') : '';
+      refs.deltaPcrVal.className = `mono ${pcrChangeTone}`;
+      refs.deltaPcrVal.textContent = pcrChange != null ? (pcrChange >= 0 ? '+' : '') + fmtNum(pcrChange, 3) : '—';
 
       // Sparkline: create or update
       const pts = (it.spark?.spot || []).map((v, i) => [it.spark.timestamps[i].replace(/([+-]\d{2}:\d{2})$/, ''), v]);

@@ -275,26 +275,26 @@ export async function mount(container) {
       t.appendChild(thead);
 
       const tbody = el('tbody');
-      // Walk rows top-down (latest first), compute deltas against previous row (which is the next in the original sorted array)
+      // Walk rows top-down (latest first), compute deltas against previous row
       const origSorted = [...summaryRows]; // ascending
       const origIdx = (r) => origSorted.indexOf(r);
 
       rows.forEach((r, displayIdx) => {
         const oi = origIdx(r);
         const rowPcr = r.total_pe_oi && r.total_ce_oi ? (r.total_pe_oi / r.total_ce_oi) : 0;
-        const prevCe = oi > 0 ? origSorted[oi - 1].total_ce_oi : r.total_ce_oi;
-        const prevPe = oi > 0 ? origSorted[oi - 1].total_pe_oi : r.total_pe_oi;
+        const prevRow = oi > 0 ? origSorted[oi - 1] : null;
+        const prevPcr = prevRow ? (prevRow.total_pe_oi / prevRow.total_ce_oi) : rowPcr;
+        const prevCe = prevRow ? prevRow.total_ce_oi : r.total_ce_oi;
+        const prevPe = prevRow ? prevRow.total_pe_oi : r.total_pe_oi;
         const cΔ = r.total_ce_oi - prevCe;
         const pΔ = r.total_pe_oi - prevPe;
-        const rowΔce = r.total_ce_oi - baseCe;
-        const rowΔpe = r.total_pe_oi - basePe;
-        const rowDeltaPcr = (rowΔce !== 0 && baseCe != null && basePe != null) ? (rowΔpe / rowΔce) : null;
+        const deltaPcr = prevRow ? (rowPcr - prevPcr) : 0;
         const tr = el('tr');
         tr.appendChild(el('td', { class: 'mono' }, fmtTimeIST(r.timestamp)));
         tr.appendChild(el('td', { class: 'mono' }, fmtCompact(r.total_ce_oi)));
         tr.appendChild(el('td', { class: 'mono' }, fmtCompact(r.total_pe_oi)));
         tr.appendChild(el('td', { class: `mono ${rowPcr >= 1 ? 'bull' : 'bear'}` }, fmtNum(rowPcr, 3)));
-        tr.appendChild(el('td', { class: `mono ${rowDeltaPcr != null ? (rowDeltaPcr >= 1 ? 'bull' : 'bear') : ''}` }, rowDeltaPcr != null ? fmtNum(rowDeltaPcr, 3) : '—'));
+        tr.appendChild(el('td', { class: `mono ${deltaPcr >= 0 ? 'bull' : 'bear'}` }, (deltaPcr >= 0 ? '+' : '') + fmtNum(deltaPcr, 3)));
         tr.appendChild(el('td', { class: `mono ${cΔ >= 0 ? 'bull' : 'bear'}` }, (cΔ >= 0 ? '+' : '') + fmtCompact(cΔ)));
         tr.appendChild(el('td', { class: `mono ${pΔ >= 0 ? 'bull' : 'bear'}` }, (pΔ >= 0 ? '+' : '') + fmtCompact(pΔ)));
         tbody.appendChild(tr);
