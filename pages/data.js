@@ -323,7 +323,12 @@ export async function mount(container) {
       return;
     }
     try {
-      const oiData = await api.totalOi(instrument, date);
+      // Fetch both: time-series for the table + dashboard for baselines
+      const [oiData, dashData] = await Promise.all([
+        api.totalOi(instrument, date),
+        api.dashboard(60),
+      ]);
+
       const rows = Array.isArray(oiData) ? oiData : (oiData.data || oiData.rows || []);
       if (!rows.length) {
         oiWrap.innerHTML = '<div class="empty-state">No OI data for this date.</div>';
@@ -349,13 +354,17 @@ export async function mount(container) {
       });
       const summaryRows = [...timeMap.values()].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
 
-      // Summary cards
+      // Get baseline data from dashboard response
+      const instData = (dashData.instruments || []).find(i => i.instrument === instrument);
+      const baselines = instData?.baselines || {};
       const latest = summaryRows[summaryRows.length - 1];
       const first = summaryRows[0];
       const pcr = latest.total_pe_oi && latest.total_ce_oi ? (latest.total_pe_oi / latest.total_ce_oi) : 0;
       const ceΔ = latest.total_ce_oi - first.total_ce_oi;
       const peΔ = latest.total_pe_oi - first.total_pe_oi;
+      const deltaPcr = instData?.delta_pcr ?? null;
 
+      // ── Cards ──
       const cards = el('div', { class: 'oi-cards' });
       const makeCard = (title, items) => el('div', { class: 'card oi-card' },
         el('div', { class: 'label' }, title),
@@ -364,25 +373,54 @@ export async function mount(container) {
           el('span', { class: `mono ${i.tone || ''}`, style: { fontWeight: '600' } }, i.value),
         )),
       );
+
+      // Card 1: Current OI + PCR + ΔPCR
       cards.appendChild(makeCard('OI Overview', [
         { label: 'CE OI', value: fmtCompact(latest.total_ce_oi) },
         { label: 'PE OI', value: fmtCompact(latest.total_pe_oi) },
         { label: 'PCR', value: fmtNum(pcr, 3), tone: pcr >= 1 ? 'bull' : 'bear' },
-      ]));
-      cards.appendChild(makeCard('OI Change', [
-        { label: 'CE Δ', value: (ceΔ >= 0 ? '+' : '') + fmtCompact(ceΔ), tone: ceΔ >= 0 ? 'bull' : 'bear' },
-        { label: 'PE Δ', value: (peΔ >= 0 ? '+' : '') + fmtCompact(peΔ), tone: peΔ >= 0 ? 'bull' : 'bear' },
-        { label: 'Ticks', value: String(summaryRows.length), tone: 'dim' },
+        { label: 'ΔPCR (OI Change)', value: deltaPcr != null ? fmtNum(deltaPcr, 3) : '—', tone: deltaPcr != null ? (deltaPcr >= 1 ? 'bull' : 'bear') : '' },
       ]));
 
-      // Table
+      // Card 2: Baseline OI — Prev Close
+      const pc = baselines.prev_close || {};
+      cards.appendChild(makeCard('Prev Close OI', [
+        { label: 'CE OI', value: fmtCompact(pc.ce_oi) },
+        { label: 'PE OI', value: fmtCompact(pc.pe_oi) },
+        { label: 'CE Δ', value: pc.ce_oi_change != null ? ((pc.ce_oi_change >= 0 ? '+' : '') + fmtCompact(pc.ce_oi_change)) : '—', tone: (pc.ce_oi_change ?? 0) >= 0 ? 'bull' : 'bear' },
+        { label: 'PE Δ', value: pc.pe_oi_change != null ? ((pc.pe_oi_change >= 0 ? '+' : '') + fmtCompact(pc.pe_oi_change)) : '—', tone: (pc.pe_oi_change ?? 0) >= 0 ? 'bull' : 'bear' },
+      ]));
+
+      // Card 3: Baseline OI — Market Open
+      const mo = baselines.market_open || {};
+      cards.appendChild(makeCard('Market Open OI', [
+        { label: 'CE OI', value: fmtCompact(mo.ce_oi) },
+        { label: 'PE OI', value: fmtCompact(mo.pe_oi) },
+        { label: 'CE Δ', value: mo.ce_oi_change != null ? ((mo.ce_oi_change >= 0 ? '+' : '') + fmtCompact(mo.ce_oi_change)) : '—', tone: (mo.ce_oi_change ?? 0) >= 0 ? 'bull' : 'bear' },
+        { label: 'PE Δ', value: mo.pe_oi_change != null ? ((mo.pe_oi_change >= 0 ? '+' : '') + fmtCompact(mo.pe_oi_change)) : '—', tone: (mo.pe_oi_change ?? 0) >= 0 ? 'bull' : 'bear' },
+      ]));
+
+      // Card 4: Baseline OI — Post Settlement
+      const ps = baselines.post_settlement || {};
+      cards.appendChild(makeCard('Post Settlement OI', [
+        { label: 'CE OI', value: fmtCompact(ps.ce_oi) },
+        { label: 'PE OI', value: fmtCompact(ps.pe_oi) },
+        { label: 'CE Δ', value: ps.ce_oi_change != null ? ((ps.ce_oi_change >= 0 ? '+' : '') + fmtCompact(ps.ce_oi_change)) : '—', tone: (ps.ce_oi_change ?? 0) >= 0 ? 'bull' : 'bear' },
+        { label: 'PE Δ', value: ps.pe_oi_change != null ? ((ps.pe_oi_change >= 0 ? '+' : '') + fmtCompact(ps.pe_oi_change)) : '—', tone: (ps.pe_oi_change ?? 0) >= 0 ? 'bull' : 'bear' },
+      ]));
+
+      // ── Table ──
       const t = el('table', { class: 'data' });
-      const cols = ['Time', 'CE OI', 'PE OI', 'PCR', 'CE Δ', 'PE Δ'];
+      const cols = ['Time', 'CE OI', 'PE OI', 'PCR', 'ΔPCR', 'CE Δ', 'PE Δ'];
       const thead = el('thead');
       const hr = el('tr');
       cols.forEach(c => hr.appendChild(el('th', {}, c)));
       thead.appendChild(hr);
       t.appendChild(thead);
+
+      // Compute baseline reference for ΔPCR per-row (use prev_close baseline)
+      const baseCe = pc.ce_oi ?? first.total_ce_oi;
+      const basePe = pc.pe_oi ?? first.total_pe_oi;
 
       const tbody = el('tbody');
       let prevCe = first.total_ce_oi, prevPe = first.total_pe_oi;
@@ -390,11 +428,16 @@ export async function mount(container) {
         const rowPcr = r.total_pe_oi && r.total_ce_oi ? (r.total_pe_oi / r.total_ce_oi) : 0;
         const cΔ = i === 0 ? 0 : r.total_ce_oi - prevCe;
         const pΔ = i === 0 ? 0 : r.total_pe_oi - prevPe;
+        // ΔPCR for this row: (PE - basePE) / (CE - baseCE)
+        const rowΔce = r.total_ce_oi - baseCe;
+        const rowΔpe = r.total_pe_oi - basePe;
+        const rowDeltaPcr = (rowΔce !== 0 && baseCe != null && basePe != null) ? (rowΔpe / rowΔce) : null;
         const tr = el('tr');
         tr.appendChild(el('td', { class: 'mono' }, fmtTimeIST(r.timestamp)));
         tr.appendChild(el('td', { class: 'mono' }, fmtCompact(r.total_ce_oi)));
         tr.appendChild(el('td', { class: 'mono' }, fmtCompact(r.total_pe_oi)));
         tr.appendChild(el('td', { class: `mono ${rowPcr >= 1 ? 'bull' : 'bear'}` }, fmtNum(rowPcr, 3)));
+        tr.appendChild(el('td', { class: `mono ${rowDeltaPcr != null ? (rowDeltaPcr >= 1 ? 'bull' : 'bear') : ''}` }, rowDeltaPcr != null ? fmtNum(rowDeltaPcr, 3) : '—'));
         tr.appendChild(el('td', { class: `mono ${cΔ >= 0 ? 'bull' : 'bear'}` }, (cΔ >= 0 ? '+' : '') + fmtCompact(cΔ)));
         tr.appendChild(el('td', { class: `mono ${pΔ >= 0 ? 'bull' : 'bear'}` }, (pΔ >= 0 ? '+' : '') + fmtCompact(pΔ)));
         tbody.appendChild(tr);
