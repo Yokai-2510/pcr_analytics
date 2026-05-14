@@ -354,20 +354,68 @@ export async function mount(container) {
     return { summaryRows, instData };
   }
 
-  // ── Baseline row helper ──
-  function baselineRow(label, ce, pe, ceChg, peChg) {
-    return el('tr',
-      el('td', { class: 'text-xs muted', style: { fontWeight: '500' } }, label),
-      el('td', { class: 'mono' }, ce != null ? fmtCompact(ce) : '—'),
-      el('td', { class: 'mono' }, pe != null ? fmtCompact(pe) : '—'),
-      el('td', { class: `mono ${(ceChg ?? 0) >= 0 ? 'bull' : 'bear'}` },
-        ceChg != null ? ((ceChg >= 0 ? '+' : '') + fmtCompact(ceChg)) : '—'),
-      el('td', { class: `mono ${(peChg ?? 0) >= 0 ? 'bull' : 'bear'}` },
-        peChg != null ? ((peChg >= 0 ? '+' : '') + fmtCompact(peChg)) : '—'),
+  // ── Build a single OI card (CE or PE) with all baseline data inside ──
+  function buildOiCard(type, currentOi, baselines) {
+    const isCE = type === 'CE';
+    const color = isCE ? 'var(--bull)' : 'var(--bear)';
+    const emoji = isCE ? '📈' : '📉';
+    const label = isCE ? 'Call OI (CE)' : 'Put OI (PE)';
+    const oiKey = isCE ? 'ce_oi' : 'pe_oi';
+    const chgKey = isCE ? 'ce_oi_change' : 'pe_oi_change';
+
+    const pc = baselines.prev_close || {};
+    const mo = baselines.market_open || {};
+    const ps = baselines.post_settlement || {};
+
+    const baseOi = pc[oiKey];
+    const totalΔ = baseOi != null ? currentOi - baseOi : null;
+
+    // Helper: one baseline section inside the card
+    const blSection = (name, oiVal, Δval, timestamp) => {
+      const rows = [];
+      // Baseline name + OI value
+      rows.push(el('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 0', borderBottom: '1px solid var(--border)' } },
+        el('div', {},
+          el('div', { style: { fontSize: '12px', fontWeight: '600', color: 'var(--text)', textTransform: 'uppercase', letterSpacing: '0.5px' } }, name),
+          timestamp ? el('div', { class: 'text-xs dim', style: { marginTop: '2px' } }, timestamp) : null,
+        ),
+        el('div', { style: { textAlign: 'right' } },
+          el('div', { class: 'mono', style: { fontWeight: '700', fontSize: '15px' } }, oiVal != null ? fmtCompact(oiVal) : '—'),
+          Δval != null ? el('div', { class: `mono text-xs ${Δval >= 0 ? 'bull' : 'bear'}`, style: { fontWeight: '600' } }, (Δval >= 0 ? '+' : '') + fmtCompact(Δval)) : null,
+        ),
+      ));
+      return rows;
+    };
+
+    const pcΔ = null; // Previous Close is the reference, no delta
+    const moΔ = mo[chgKey] ?? null;
+    const psΔ = ps[chgKey] ?? null;
+
+    return el('div', { class: 'card oi-card', style: { padding: '20px' } },
+      // ── Header: type + current OI ──
+      el('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '18px', paddingBottom: '14px', borderBottom: '2px solid var(--border)' } },
+        el('div', { style: { fontSize: '16px', fontWeight: '700', color } }, `${emoji}  ${label}`),
+        el('div', { style: { textAlign: 'right' } },
+          el('div', { class: 'dim text-xs', style: { marginBottom: '2px' } }, 'Current OI'),
+          el('div', { class: 'mono', style: { fontWeight: '800', fontSize: '24px', color } }, fmtCompact(currentOi)),
+        ),
+      ),
+
+      // ── Total change from Previous Close ──
+      totalΔ != null ? el('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 14px', background: 'var(--surface-1)', borderRadius: 'var(--r-md)', border: '1px solid var(--border)', marginBottom: '16px' } },
+        el('span', { class: 'text-xs muted', style: { fontWeight: '500' } }, 'Total Δ from Prev Close'),
+        el('span', { class: `mono ${totalΔ >= 0 ? 'bull' : 'bear'}`, style: { fontWeight: '700', fontSize: '16px' } }, (totalΔ >= 0 ? '+' : '') + fmtCompact(totalΔ)),
+      ) : null,
+
+      // ── 3 Baselines ──
+      el('div', { style: { fontSize: '12px', fontWeight: '600', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '8px' } }, 'Baselines'),
+      ...blSection('Previous Close', pc[oiKey], pcΔ, null),
+      ...blSection('Market Open', mo[oiKey], moΔ, null),
+      ...blSection('Post Settlement', ps[oiKey], psΔ, null),
     );
   }
 
-  // ── OI Analytics (cards + baseline table + summary) ──
+  // ── OI Analytics: just 2 cards (CE + PE), everything inside ──
   async function renderOiAnalytics() {
     oiAnalyticsWrap.innerHTML = '<div class="dim" style="padding:24px">Loading OI data…</div>';
     if (!state.instrument || !state.date) {
@@ -380,30 +428,18 @@ export async function mount(container) {
       const { summaryRows, instData } = data;
       const baselines = instData?.baselines || {};
       const latest = summaryRows[summaryRows.length - 1];
-      const first = summaryRows[0];
       const pcr = latest.total_pe_oi && latest.total_ce_oi ? (latest.total_pe_oi / latest.total_ce_oi) : 0;
       const deltaPcr = instData?.delta_pcr ?? null;
-      const pc = baselines.prev_close || {};
-      const mo = baselines.market_open || {};
-      const ps = baselines.post_settlement || {};
 
-      // ── Summary bar ──
-      const summaryBar = el('div', { class: 'card', style: { display: 'flex', gap: '24px', alignItems: 'center', flexWrap: 'wrap', padding: '14px 20px', marginBottom: '16px' } },
+      // ── Top summary strip ──
+      const summaryStrip = el('div', { class: 'card', style: { display: 'flex', gap: '28px', alignItems: 'center', flexWrap: 'wrap', padding: '14px 20px', marginBottom: '16px' } },
         el('div', {},
           el('span', { class: 'text-xs muted' }, 'PCR'),
           el('div', { class: `mono ${pcr >= 1 ? 'bull' : 'bear'}`, style: { fontWeight: '700', fontSize: '18px' } }, fmtNum(pcr, 3)),
         ),
         el('div', { style: { borderLeft: '1px solid var(--border)', paddingLeft: '20px' } },
-          el('span', { class: 'text-xs muted' }, 'ΔPCR (OI Change)'),
+          el('span', { class: 'text-xs muted' }, 'ΔPCR'),
           el('div', { class: `mono ${deltaPcr != null ? (deltaPcr >= 1 ? 'bull' : 'bear') : ''}`, style: { fontWeight: '700', fontSize: '18px' } }, deltaPcr != null ? fmtNum(deltaPcr, 3) : '—'),
-        ),
-        el('div', { style: { borderLeft: '1px solid var(--border)', paddingLeft: '20px' } },
-          el('span', { class: 'text-xs muted' }, 'Total CE OI'),
-          el('div', { class: 'mono', style: { fontWeight: '700', fontSize: '18px' } }, fmtCompact(latest.total_ce_oi)),
-        ),
-        el('div', { style: { borderLeft: '1px solid var(--border)', paddingLeft: '20px' } },
-          el('span', { class: 'text-xs muted' }, 'Total PE OI'),
-          el('div', { class: 'mono', style: { fontWeight: '700', fontSize: '18px' } }, fmtCompact(latest.total_pe_oi)),
         ),
         el('div', { style: { borderLeft: '1px solid var(--border)', paddingLeft: '20px' } },
           el('span', { class: 'text-xs muted' }, 'Ticks'),
@@ -411,116 +447,14 @@ export async function mount(container) {
         ),
       );
 
-      // ── CE Card (full detail) ──
-      const ceCard = el('div', { class: 'card oi-card', style: { padding: '20px' } },
-        el('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' } },
-          el('div', { style: { fontSize: '15px', fontWeight: '700', color: 'var(--bull)' } }, '📈  Call OI (CE)'),
-          el('div', { class: 'mono', style: { fontWeight: '800', fontSize: '22px' } }, fmtCompact(latest.total_ce_oi)),
-        ),
-        // Baseline comparison table
-        el('table', { class: 'data', style: { marginTop: '0' } },
-          el('thead', el('tr',
-            el('th', {}, 'Baseline'),
-            el('th', {}, 'CE OI'),
-            el('th', {}, 'Δ CE OI'),
-          )),
-          el('tbody',
-            el('tr',
-              el('td', { class: 'text-xs muted', style: { fontWeight: '500' } }, 'Previous Close'),
-              el('td', { class: 'mono', style: { fontWeight: '600' } }, pc.ce_oi != null ? fmtCompact(pc.ce_oi) : '—'),
-              el('td', { class: 'dim' }, '—'),
-            ),
-            el('tr',
-              el('td', { class: 'text-xs muted', style: { fontWeight: '500' } }, 'Market Open'),
-              el('td', { class: 'mono', style: { fontWeight: '600' } }, mo.ce_oi != null ? fmtCompact(mo.ce_oi) : '—'),
-              el('td', { class: `mono ${(mo.ce_oi_change ?? 0) >= 0 ? 'bull' : 'bear'}`, style: { fontWeight: '600' } },
-                mo.ce_oi_change != null ? ((mo.ce_oi_change >= 0 ? '+' : '') + fmtCompact(mo.ce_oi_change)) : '—'),
-            ),
-            el('tr',
-              el('td', { class: 'text-xs muted', style: { fontWeight: '500' } }, 'Post Settlement'),
-              el('td', { class: 'mono', style: { fontWeight: '600' } }, ps.ce_oi != null ? fmtCompact(ps.ce_oi) : '—'),
-              el('td', { class: `mono ${(ps.ce_oi_change ?? 0) >= 0 ? 'bull' : 'bear'}`, style: { fontWeight: '600' } },
-                ps.ce_oi_change != null ? ((ps.ce_oi_change >= 0 ? '+' : '') + fmtCompact(ps.ce_oi_change)) : '—'),
-            ),
-          ),
-        ),
-        // Current vs baselines
-        el('div', { style: { marginTop: '14px', padding: '10px 12px', background: 'var(--surface-1)', borderRadius: 'var(--r-md)', border: '1px solid var(--border)' } },
-          el('div', { class: 'text-xs muted', style: { marginBottom: '6px' } }, 'Current vs Previous Close'),
-          el('div', { class: `mono ${(latest.total_ce_oi - (pc.ce_oi ?? latest.total_ce_oi)) >= 0 ? 'bull' : 'bear'}`, style: { fontWeight: '700', fontSize: '16px' } },
-            fmtSigned(latest.total_ce_oi - (pc.ce_oi ?? latest.total_ce_oi))),
-        ),
-      );
-
-      // ── PE Card (full detail) ──
-      const peCard = el('div', { class: 'card oi-card', style: { padding: '20px' } },
-        el('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' } },
-          el('div', { style: { fontSize: '15px', fontWeight: '700', color: 'var(--bear)' } }, '📉  Put OI (PE)'),
-          el('div', { class: 'mono', style: { fontWeight: '800', fontSize: '22px' } }, fmtCompact(latest.total_pe_oi)),
-        ),
-        el('table', { class: 'data', style: { marginTop: '0' } },
-          el('thead', el('tr',
-            el('th', {}, 'Baseline'),
-            el('th', {}, 'PE OI'),
-            el('th', {}, 'Δ PE OI'),
-          )),
-          el('tbody',
-            el('tr',
-              el('td', { class: 'text-xs muted', style: { fontWeight: '500' } }, 'Previous Close'),
-              el('td', { class: 'mono', style: { fontWeight: '600' } }, pc.pe_oi != null ? fmtCompact(pc.pe_oi) : '—'),
-              el('td', { class: 'dim' }, '—'),
-            ),
-            el('tr',
-              el('td', { class: 'text-xs muted', style: { fontWeight: '500' } }, 'Market Open'),
-              el('td', { class: 'mono', style: { fontWeight: '600' } }, mo.pe_oi != null ? fmtCompact(mo.pe_oi) : '—'),
-              el('td', { class: `mono ${(mo.pe_oi_change ?? 0) >= 0 ? 'bull' : 'bear'}`, style: { fontWeight: '600' } },
-                mo.pe_oi_change != null ? ((mo.pe_oi_change >= 0 ? '+' : '') + fmtCompact(mo.pe_oi_change)) : '—'),
-            ),
-            el('tr',
-              el('td', { class: 'text-xs muted', style: { fontWeight: '500' } }, 'Post Settlement'),
-              el('td', { class: 'mono', style: { fontWeight: '600' } }, ps.pe_oi != null ? fmtCompact(ps.pe_oi) : '—'),
-              el('td', { class: `mono ${(ps.pe_oi_change ?? 0) >= 0 ? 'bull' : 'bear'}`, style: { fontWeight: '600' } },
-                ps.pe_oi_change != null ? ((ps.pe_oi_change >= 0 ? '+' : '') + fmtCompact(ps.pe_oi_change)) : '—'),
-            ),
-          ),
-        ),
-        el('div', { style: { marginTop: '14px', padding: '10px 12px', background: 'var(--surface-1)', borderRadius: 'var(--r-md)', border: '1px solid var(--border)' } },
-          el('div', { class: 'text-xs muted', style: { marginBottom: '6px' } }, 'Current vs Previous Close'),
-          el('div', { class: `mono ${(latest.total_pe_oi - (pc.pe_oi ?? latest.total_pe_oi)) >= 0 ? 'bull' : 'bear'}`, style: { fontWeight: '700', fontSize: '16px' } },
-            fmtSigned(latest.total_pe_oi - (pc.pe_oi ?? latest.total_pe_oi))),
-        ),
-      );
-
-      // ── Combined baseline comparison table ──
-      const combinedTable = el('div', { class: 'card', style: { padding: '16px', marginTop: '16px' } },
-        el('div', { style: { fontSize: '14px', fontWeight: '600', marginBottom: '12px' } }, 'Baseline Comparison'),
-        el('div', { class: 'data-grid-wrap', style: { maxHeight: 'none' } },
-          el('table', { class: 'data' },
-            el('thead', el('tr',
-              el('th', {}, 'Baseline'),
-              el('th', {}, 'CE OI'),
-              el('th', {}, 'PE OI'),
-              el('th', {}, 'CE Δ'),
-              el('th', {}, 'PE Δ'),
-            )),
-            el('tbody',
-              baselineRow('Previous Close', pc.ce_oi, pc.pe_oi, null, null),
-              baselineRow('Market Open', mo.ce_oi, mo.pe_oi, mo.ce_oi_change, mo.pe_oi_change),
-              baselineRow('Post Settlement', ps.ce_oi, ps.pe_oi, ps.ce_oi_change, ps.pe_oi_change),
-              baselineRow('Current (Latest)', latest.total_ce_oi, latest.total_pe_oi,
-                latest.total_ce_oi - (pc.ce_oi ?? latest.total_ce_oi),
-                latest.total_pe_oi - (pc.pe_oi ?? latest.total_pe_oi)),
-            ),
-          ),
-        ),
-      );
-
-      // ── Assemble ──
+      // ── Two cards: CE and PE ──
+      const ceCard = buildOiCard('CE', latest.total_ce_oi, baselines);
+      const peCard = buildOiCard('PE', latest.total_pe_oi, baselines);
       const cardsRow = el('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' } }, ceCard, peCard);
+
       oiAnalyticsWrap.innerHTML = '';
-      oiAnalyticsWrap.appendChild(summaryBar);
+      oiAnalyticsWrap.appendChild(summaryStrip);
       oiAnalyticsWrap.appendChild(cardsRow);
-      oiAnalyticsWrap.appendChild(combinedTable);
     } catch (e) {
       oiAnalyticsWrap.innerHTML = `<div class="empty-state"><span class="bear">Failed</span><span class="text-xs mono dim">${e.message}</span></div>`;
     }
