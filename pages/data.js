@@ -9,7 +9,7 @@ let selectedCols = [];
 let filters = [];
 let searchQuery = '';
 let resampleInterval = 'raw';
-let showOiSummary = false;
+let showOiMode = 'table'; // 'table' | 'dashboard' | 'logs'
 
 const state = {
   instrument: 'nifty',
@@ -115,7 +115,8 @@ export async function mount(container) {
   const filterBtn = el('button', { class: 'btn ghost sm', onclick: () => openFilterDialog(f => { filters.push(f); rebuild(); }) }, icon('plus'), 'Filter');
   const colsBtn = el('button', { class: 'btn ghost sm', onclick: () => openColumnsDialog(() => rebuild()) }, 'Columns');
   const refreshBtn = el('button', { class: 'btn ghost sm', onclick: runQuery, title: 'Refresh' }, icon('refresh'));
-  const oiBtn = el('button', { class: 'btn ghost sm', onclick: () => { showOiSummary = !showOiSummary; oiBtn.classList.toggle('active', showOiSummary); renderBody(); } }, 'OI Summary');
+  const oiDashboardBtn = el('button', { class: 'btn ghost sm', onclick: () => { showOiMode = 'dashboard'; oiDashboardBtn.classList.add('active'); oiLogsBtn.classList.remove('active'); renderBody(); } }, 'OI Dashboard');
+  const oiLogsBtn = el('button', { class: 'btn ghost sm', onclick: () => { showOiMode = 'logs'; oiLogsBtn.classList.add('active'); oiDashboardBtn.classList.remove('active'); renderBody(); } }, 'OI Logs');
   const exportBtn = el('button', { class: 'btn secondary sm', onclick: exportCSV }, 'Export CSV');
 
   controls.append(
@@ -126,7 +127,7 @@ export async function mount(container) {
     el('div', { class: 'data-sep' }),
     filterBtn, colsBtn, refreshBtn,
     el('div', { class: 'data-sep' }),
-    oiBtn,
+    oiDashboardBtn, oiLogsBtn,
     el('div', { class: 'spacer' }),
     exportBtn,
   );
@@ -171,12 +172,19 @@ export async function mount(container) {
 
   // ── Table rendering ──
   function renderBody() {
-    // Toggle OI summary vs table
-    if (showOiSummary) {
+    // Toggle OI views vs table
+    if (showOiMode === 'dashboard') {
       tableWrap.style.display = 'none';
       oiWrap.style.display = '';
       pag.style.display = 'none';
-      renderOiSummary();
+      renderOiDashboard();
+      return;
+    }
+    if (showOiMode === 'logs') {
+      tableWrap.style.display = 'none';
+      oiWrap.style.display = '';
+      pag.style.display = 'none';
+      renderOiLogs();
       return;
     }
     tableWrap.style.display = '';
@@ -313,101 +321,105 @@ export async function mount(container) {
     runQuery();
   }
 
-  // ── OI Summary (inline, replaces table) ──
-  async function renderOiSummary() {
-    oiWrap.innerHTML = '<div class="dim" style="padding:24px">Loading OI data…</div>';
+  // ── Shared: fetch + aggregate OI data ──
+  async function _fetchOiData() {
     const instrument = state.instrument;
     const date = state.date;
-    if (!instrument || !date) {
-      oiWrap.innerHTML = '<div class="empty-state">Select a date to view OI summary.</div>';
+    if (!instrument || !date) return null;
+    const [oiData, dashData] = await Promise.all([
+      api.totalOi(instrument, date),
+      api.dashboard(60),
+    ]);
+    const rows = Array.isArray(oiData) ? oiData : (oiData.data || oiData.rows || []);
+    if (!rows.length) return null;
+    const timeMap = new Map();
+    rows.forEach(r => {
+      const ts = r.timestamp || r.time || r.date;
+      if (!ts) return;
+      const existing = timeMap.get(ts);
+      if (existing) {
+        existing.total_ce_oi += (r.total_ce_oi || r.ce_oi || 0);
+        existing.total_pe_oi += (r.total_pe_oi || r.pe_oi || 0);
+      } else {
+        timeMap.set(ts, { timestamp: ts, total_ce_oi: r.total_ce_oi || r.ce_oi || 0, total_pe_oi: r.total_pe_oi || r.pe_oi || 0 });
+      }
+    });
+    const summaryRows = [...timeMap.values()].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+    const instData = (dashData.instruments || []).find(i => i.instrument === instrument);
+    return { summaryRows, instData };
+  }
+
+  // ── OI Dashboard (cards + table) ──
+  async function renderOiDashboard() {
+    oiWrap.innerHTML = '<div class="dim" style="padding:24px">Loading OI data…</div>';
+    if (!state.instrument || !state.date) {
+      oiWrap.innerHTML = '<div class="empty-state">Select a date to view OI dashboard.</div>';
       return;
     }
     try {
-      // Fetch both: time-series for the table + dashboard for baselines
-      const [oiData, dashData] = await Promise.all([
-        api.totalOi(instrument, date),
-        api.dashboard(60),
-      ]);
-
-      const rows = Array.isArray(oiData) ? oiData : (oiData.data || oiData.rows || []);
-      if (!rows.length) {
-        oiWrap.innerHTML = '<div class="empty-state">No OI data for this date.</div>';
-        return;
-      }
-
-      // Aggregate by timestamp
-      const timeMap = new Map();
-      rows.forEach(r => {
-        const ts = r.timestamp || r.time || r.date;
-        if (!ts) return;
-        const existing = timeMap.get(ts);
-        if (existing) {
-          existing.total_ce_oi += (r.total_ce_oi || r.ce_oi || 0);
-          existing.total_pe_oi += (r.total_pe_oi || r.pe_oi || 0);
-        } else {
-          timeMap.set(ts, {
-            timestamp: ts,
-            total_ce_oi: r.total_ce_oi || r.ce_oi || 0,
-            total_pe_oi: r.total_pe_oi || r.pe_oi || 0,
-          });
-        }
-      });
-      const summaryRows = [...timeMap.values()].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
-
-      // Get baseline data from dashboard response
-      const instData = (dashData.instruments || []).find(i => i.instrument === instrument);
+      const data = await _fetchOiData();
+      if (!data) { oiWrap.innerHTML = '<div class="empty-state">No OI data for this date.</div>'; return; }
+      const { summaryRows, instData } = data;
       const baselines = instData?.baselines || {};
       const latest = summaryRows[summaryRows.length - 1];
       const first = summaryRows[0];
       const pcr = latest.total_pe_oi && latest.total_ce_oi ? (latest.total_pe_oi / latest.total_ce_oi) : 0;
-      const ceΔ = latest.total_ce_oi - first.total_ce_oi;
-      const peΔ = latest.total_pe_oi - first.total_pe_oi;
       const deltaPcr = instData?.delta_pcr ?? null;
+      const pc = baselines.prev_close || {};
+      const mo = baselines.market_open || {};
+      const ps = baselines.post_settlement || {};
+      const baseCe = pc.ce_oi ?? first.total_ce_oi;
+      const basePe = pc.pe_oi ?? first.total_pe_oi;
 
-      // ── Cards ──
-      const cards = el('div', { class: 'oi-cards' });
-      const makeCard = (title, items) => el('div', { class: 'card oi-card' },
-        el('div', { class: 'label' }, title),
-        ...items.map(i => el('div', { class: 'oi-row' },
-          el('span', { class: 'text-xs muted' }, i.label),
-          el('span', { class: `mono ${i.tone || ''}`, style: { fontWeight: '600' } }, i.value),
-        )),
+      // Helper: row for a baseline
+      const blRow = (label, ce, pe, ceChg, peChg) => el('tr',
+        el('td', { class: 'text-xs muted' }, label),
+        el('td', { class: 'mono' }, fmtCompact(ce)),
+        el('td', { class: 'mono' }, fmtCompact(pe)),
+        el('td', { class: `mono ${(ceChg ?? 0) >= 0 ? 'bull' : 'bear'}` }, ceChg != null ? ((ceChg >= 0 ? '+' : '') + fmtCompact(ceChg)) : '—'),
+        el('td', { class: `mono ${(peChg ?? 0) >= 0 ? 'bull' : 'bear'}` }, peChg != null ? ((peChg >= 0 ? '+' : '') + fmtCompact(peChg)) : '—'),
       );
 
-      // Card 1: Current OI + PCR + ΔPCR
-      cards.appendChild(makeCard('OI Overview', [
-        { label: 'CE OI', value: fmtCompact(latest.total_ce_oi) },
-        { label: 'PE OI', value: fmtCompact(latest.total_pe_oi) },
-        { label: 'PCR', value: fmtNum(pcr, 3), tone: pcr >= 1 ? 'bull' : 'bear' },
-        { label: 'ΔPCR (OI Change)', value: deltaPcr != null ? fmtNum(deltaPcr, 3) : '—', tone: deltaPcr != null ? (deltaPcr >= 1 ? 'bull' : 'bear') : '' },
-      ]));
+      // ── CE Card ──
+      const ceCard = el('div', { class: 'card oi-card' },
+        el('div', { class: 'label', style: { fontSize: '14px', fontWeight: '600', marginBottom: '10px' } }, 'Call OI (CE)'),
+        el('div', { class: 'oi-row' },
+          el('span', { class: 'text-xs muted' }, 'Current'),
+          el('span', { class: 'mono', style: { fontWeight: '700', fontSize: '18px' } }, fmtCompact(latest.total_ce_oi)),
+        ),
+        el('table', { class: 'data', style: { marginTop: '10px' } },
+          el('thead', el('tr', el('th', {}, 'Baseline'), el('th', {}, 'OI'), el('th', {}, 'Δ from baseline'))),
+          el('tbody',
+            blRow('Prev Close', pc.ce_oi, null, null, null),
+            blRow('Market Open', mo.ce_oi, null, mo.ce_oi_change, null),
+            blRow('Post Settlement', ps.ce_oi, null, ps.ce_oi_change, null),
+          ),
+        ),
+      );
 
-      // Card 2: Baseline OI — Prev Close
-      const pc = baselines.prev_close || {};
-      cards.appendChild(makeCard('Prev Close OI', [
-        { label: 'CE OI', value: fmtCompact(pc.ce_oi) },
-        { label: 'PE OI', value: fmtCompact(pc.pe_oi) },
-        { label: 'CE Δ', value: pc.ce_oi_change != null ? ((pc.ce_oi_change >= 0 ? '+' : '') + fmtCompact(pc.ce_oi_change)) : '—', tone: (pc.ce_oi_change ?? 0) >= 0 ? 'bull' : 'bear' },
-        { label: 'PE Δ', value: pc.pe_oi_change != null ? ((pc.pe_oi_change >= 0 ? '+' : '') + fmtCompact(pc.pe_oi_change)) : '—', tone: (pc.pe_oi_change ?? 0) >= 0 ? 'bull' : 'bear' },
-      ]));
+      // ── PE Card ──
+      const peCard = el('div', { class: 'card oi-card' },
+        el('div', { class: 'label', style: { fontSize: '14px', fontWeight: '600', marginBottom: '10px' } }, 'Put OI (PE)'),
+        el('div', { class: 'oi-row' },
+          el('span', { class: 'text-xs muted' }, 'Current'),
+          el('span', { class: 'mono', style: { fontWeight: '700', fontSize: '18px' } }, fmtCompact(latest.total_pe_oi)),
+        ),
+        el('table', { class: 'data', style: { marginTop: '10px' } },
+          el('thead', el('tr', el('th', {}, 'Baseline'), el('th', {}, 'OI'), el('th', {}, 'Δ from baseline'))),
+          el('tbody',
+            blRow('Prev Close', pc.pe_oi, null, null, null),
+            blRow('Market Open', mo.pe_oi, null, mo.pe_oi_change, null),
+            blRow('Post Settlement', ps.pe_oi, null, ps.pe_oi_change, null),
+          ),
+        ),
+      );
 
-      // Card 3: Baseline OI — Market Open
-      const mo = baselines.market_open || {};
-      cards.appendChild(makeCard('Market Open OI', [
-        { label: 'CE OI', value: fmtCompact(mo.ce_oi) },
-        { label: 'PE OI', value: fmtCompact(mo.pe_oi) },
-        { label: 'CE Δ', value: mo.ce_oi_change != null ? ((mo.ce_oi_change >= 0 ? '+' : '') + fmtCompact(mo.ce_oi_change)) : '—', tone: (mo.ce_oi_change ?? 0) >= 0 ? 'bull' : 'bear' },
-        { label: 'PE Δ', value: mo.pe_oi_change != null ? ((mo.pe_oi_change >= 0 ? '+' : '') + fmtCompact(mo.pe_oi_change)) : '—', tone: (mo.pe_oi_change ?? 0) >= 0 ? 'bull' : 'bear' },
-      ]));
-
-      // Card 4: Baseline OI — Post Settlement
-      const ps = baselines.post_settlement || {};
-      cards.appendChild(makeCard('Post Settlement OI', [
-        { label: 'CE OI', value: fmtCompact(ps.ce_oi) },
-        { label: 'PE OI', value: fmtCompact(ps.pe_oi) },
-        { label: 'CE Δ', value: ps.ce_oi_change != null ? ((ps.ce_oi_change >= 0 ? '+' : '') + fmtCompact(ps.ce_oi_change)) : '—', tone: (ps.ce_oi_change ?? 0) >= 0 ? 'bull' : 'bear' },
-        { label: 'PE Δ', value: ps.pe_oi_change != null ? ((ps.pe_oi_change >= 0 ? '+' : '') + fmtCompact(ps.pe_oi_change)) : '—', tone: (ps.pe_oi_change ?? 0) >= 0 ? 'bull' : 'bear' },
-      ]));
+      // ── Summary bar ──
+      const summaryBar = el('div', { class: 'card', style: { display: 'flex', gap: '24px', alignItems: 'center', flexWrap: 'wrap', padding: '14px 20px' } },
+        el('div', {}, el('span', { class: 'text-xs muted' }, 'PCR'), el('div', { class: `mono ${pcr >= 1 ? 'bull' : 'bear'}`, style: { fontWeight: '700', fontSize: '16px' } }, fmtNum(pcr, 3))),
+        el('div', { style: { borderLeft: '1px solid var(--border)', paddingLeft: '20px' } }, el('span', { class: 'text-xs muted' }, 'ΔPCR (OI Change)'), el('div', { class: `mono ${deltaPcr != null ? (deltaPcr >= 1 ? 'bull' : 'bear') : ''}`, style: { fontWeight: '700', fontSize: '16px' } }, deltaPcr != null ? fmtNum(deltaPcr, 3) : '—')),
+        el('div', { style: { borderLeft: '1px solid var(--border)', paddingLeft: '20px' } }, el('span', { class: 'text-xs muted' }, 'Ticks'), el('div', { class: 'mono', style: { fontWeight: '600' } }, String(summaryRows.length))),
+      );
 
       // ── Table ──
       const t = el('table', { class: 'data' });
@@ -418,9 +430,63 @@ export async function mount(container) {
       thead.appendChild(hr);
       t.appendChild(thead);
 
-      // Compute baseline reference for ΔPCR per-row (use prev_close baseline)
+      const tbody = el('tbody');
+      let prevCe = first.total_ce_oi, prevPe = first.total_pe_oi;
+      summaryRows.forEach((r, i) => {
+        const rowPcr = r.total_pe_oi && r.total_ce_oi ? (r.total_pe_oi / r.total_ce_oi) : 0;
+        const cΔ = i === 0 ? 0 : r.total_ce_oi - prevCe;
+        const pΔ = i === 0 ? 0 : r.total_pe_oi - prevPe;
+        const rowΔce = r.total_ce_oi - baseCe;
+        const rowΔpe = r.total_pe_oi - basePe;
+        const rowDeltaPcr = (rowΔce !== 0 && baseCe != null && basePe != null) ? (rowΔpe / rowΔce) : null;
+        const tr = el('tr');
+        tr.appendChild(el('td', { class: 'mono' }, fmtTimeIST(r.timestamp)));
+        tr.appendChild(el('td', { class: 'mono' }, fmtCompact(r.total_ce_oi)));
+        tr.appendChild(el('td', { class: 'mono' }, fmtCompact(r.total_pe_oi)));
+        tr.appendChild(el('td', { class: `mono ${rowPcr >= 1 ? 'bull' : 'bear'}` }, fmtNum(rowPcr, 3)));
+        tr.appendChild(el('td', { class: `mono ${rowDeltaPcr != null ? (rowDeltaPcr >= 1 ? 'bull' : 'bear') : ''}` }, rowDeltaPcr != null ? fmtNum(rowDeltaPcr, 3) : '—'));
+        tr.appendChild(el('td', { class: `mono ${cΔ >= 0 ? 'bull' : 'bear'}` }, (cΔ >= 0 ? '+' : '') + fmtCompact(cΔ)));
+        tr.appendChild(el('td', { class: `mono ${pΔ >= 0 ? 'bull' : 'bear'}` }, (pΔ >= 0 ? '+' : '') + fmtCompact(pΔ)));
+        tbody.appendChild(tr);
+        prevCe = r.total_ce_oi;
+        prevPe = r.total_pe_oi;
+      });
+      t.appendChild(tbody);
+
+      const cardsRow = el('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', marginBottom: '16px' } }, ceCard, peCard);
+      oiWrap.innerHTML = '';
+      oiWrap.appendChild(summaryBar);
+      oiWrap.appendChild(cardsRow);
+      oiWrap.appendChild(el('div', { class: 'data-grid-wrap' }, t));
+    } catch (e) {
+      oiWrap.innerHTML = `<div class="empty-state"><span class="bear">Failed</span><span class="text-xs mono dim">${e.message}</span></div>`;
+    }
+  }
+
+  // ── OI Logs (time-series table only, no cards) ──
+  async function renderOiLogs() {
+    oiWrap.innerHTML = '<div class="dim" style="padding:24px">Loading OI data…</div>';
+    if (!state.instrument || !state.date) {
+      oiWrap.innerHTML = '<div class="empty-state">Select a date to view OI logs.</div>';
+      return;
+    }
+    try {
+      const data = await _fetchOiData();
+      if (!data) { oiWrap.innerHTML = '<div class="empty-state">No OI data for this date.</div>'; return; }
+      const { summaryRows, instData } = data;
+      const baselines = instData?.baselines || {};
+      const first = summaryRows[0];
+      const pc = baselines.prev_close || {};
       const baseCe = pc.ce_oi ?? first.total_ce_oi;
       const basePe = pc.pe_oi ?? first.total_pe_oi;
+
+      const t = el('table', { class: 'data' });
+      const cols = ['Time', 'CE OI', 'PE OI', 'PCR', 'ΔPCR', 'CE Δ', 'PE Δ'];
+      const thead = el('thead');
+      const hr = el('tr');
+      cols.forEach(c => hr.appendChild(el('th', {}, c)));
+      thead.appendChild(hr);
+      t.appendChild(thead);
 
       const tbody = el('tbody');
       let prevCe = first.total_ce_oi, prevPe = first.total_pe_oi;
@@ -428,7 +494,6 @@ export async function mount(container) {
         const rowPcr = r.total_pe_oi && r.total_ce_oi ? (r.total_pe_oi / r.total_ce_oi) : 0;
         const cΔ = i === 0 ? 0 : r.total_ce_oi - prevCe;
         const pΔ = i === 0 ? 0 : r.total_pe_oi - prevPe;
-        // ΔPCR for this row: (PE - basePE) / (CE - baseCE)
         const rowΔce = r.total_ce_oi - baseCe;
         const rowΔpe = r.total_pe_oi - basePe;
         const rowDeltaPcr = (rowΔce !== 0 && baseCe != null && basePe != null) ? (rowΔpe / rowΔce) : null;
@@ -447,7 +512,6 @@ export async function mount(container) {
       t.appendChild(tbody);
 
       oiWrap.innerHTML = '';
-      oiWrap.appendChild(cards);
       oiWrap.appendChild(el('div', { class: 'data-grid-wrap' }, t));
     } catch (e) {
       oiWrap.innerHTML = `<div class="empty-state"><span class="bear">Failed</span><span class="text-xs mono dim">${e.message}</span></div>`;
