@@ -1022,11 +1022,15 @@ table.data tbody tr:hover { background: var(--surface-1); }
 }
 @media (max-width: 720px) {
   .topbar { grid-template-columns: auto 1fr auto; padding: 10px 14px; }
-  .tabs { display: none; }
+  .topbar .tabs { display: none; }
 }
 
 /* ── Data page (clean rewrite) ─────────────────────────────────────── */
 .data-page { display: flex; flex-direction: column; gap: 0; }
+.data-page .tabs {
+  overflow-x: auto;
+  max-width: 100%;
+}
 
 .data-toolbar {
   background: var(--surface-1);

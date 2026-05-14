@@ -10,6 +10,7 @@ let filters = [];
 let searchQuery = '';
 let resampleInterval = 'raw';
 let activeTab = 'all-logs'; // 'all-logs' | 'oi-analytics' | 'oi-logs'
+let pollTimer = null;
 
 const state = {
   instrument: 'nifty',
@@ -125,8 +126,8 @@ export async function mount(container) {
   );
   toolbar.appendChild(controls);
 
-  // ── Tab bar ──
-  const tabBar = el('div', { class: 'subtabs', style: { marginBottom: '0' } });
+  // ── Tab bar (main-level styling) ──
+  const tabBar = el('div', { class: 'tabs', style: { marginBottom: '0' } });
   const tabs = [
     { id: 'all-logs', label: 'All Logs' },
     { id: 'oi-analytics', label: 'OI Analytics' },
@@ -135,7 +136,7 @@ export async function mount(container) {
   const tabEls = {};
   tabs.forEach(t => {
     const btn = el('button', {
-      class: 'subtab' + (activeTab === t.id ? ' active' : ''),
+      class: 'tab' + (activeTab === t.id ? ' active' : ''),
       onclick: () => switchTab(t.id),
     }, t.label);
     tabEls[t.id] = btn;
@@ -634,8 +635,15 @@ export async function mount(container) {
     });
   }
 
-  // ── Initial load ──
+  // ── Initial load + auto-refresh (60s, like dashboard/charts) ──
   await runQuery();
+  pollTimer = setInterval(() => {
+    if (activeTab === 'all-logs') runQuery();
+    else if (activeTab === 'oi-analytics') renderOiAnalytics();
+    else if (activeTab === 'oi-logs') renderOiLogs();
+  }, 60000);
 }
 
-export function unmount() {}
+export function unmount() {
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+}
