@@ -79,6 +79,11 @@ export function fmtClockIST(date = new Date()) {
   const fmt = new Intl.DateTimeFormat('en-IN', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Kolkata' });
   return fmt.format(date);
 }
+export function fmtDateClockIST(date = new Date()) {
+  const d = new Intl.DateTimeFormat('en-IN', { day: '2-digit', month: 'short', timeZone: 'Asia/Kolkata' }).format(date);
+  const t = new Intl.DateTimeFormat('en-IN', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Kolkata' }).format(date);
+  return `${d}  ${t}`;
+}
 export function fmtTimeIST(iso) {
   if (!iso) return '—';
   const fmt = new Intl.DateTimeFormat('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone: 'Asia/Kolkata' });

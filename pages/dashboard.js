@@ -11,7 +11,7 @@ let _initialized = false;
 
 // refs captured during first build for in-place updates
 let _heroStatEls = {};    // { spot, change, pcr, atm, strikes, rows }
-let _instCardEls = {};    // keyed by instrument → { pill, spotVal, spotSub, pcrLabel, pcrBar, ceOi, ceChange, peOi, peChange, card }
+let _instCardEls = {};    // keyed by instrument → { pill, spotVal, spotSub, pcrLabel, pcrBar, ceOi, ceChange, peOi, peChange, deltaPcrVal, spark }
 let _utilEls = {};        // { statePill, lastFetch, nextFetch, collector, api, error, sentiment, ceOi, peOi, portPcr, live }
 let _bottomEls = {};      // { moverRows: {inst: {spot, pill}}, activityList }
 let _featuredEls = {};    // { title }
@@ -131,16 +131,26 @@ export async function mount(container) {
       const peOi = el('div', { class: 'mono', style: { fontSize: '13px', fontWeight: 500 } }, fmtCompact(it.total_pe_oi));
       const peChange = el('div', { class: `mono ${it.pe_oi_change >= 0 ? 'bull' : 'bear'}`, style: { fontSize: '10px' } },
         fmtSigned(it.pe_oi_change, 0) === '—' ? '—' : (it.pe_oi_change >= 0 ? '+' : '') + fmtCompact(it.pe_oi_change));
+
+      const deltaPcr = it.delta_pcr ?? null;
+      const deltaPcrTone = deltaPcr != null ? (deltaPcr >= 1 ? 'bull' : 'bear') : '';
+      const deltaPcrVal = el('div', { class: `mono ${deltaPcrTone}`, style: { fontSize: '15px', fontWeight: 600 } }, deltaPcr != null ? fmtNum(deltaPcr, 3) : '—');
+
       card.appendChild(el('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' } },
         el('div', {}, el('div', { style: { fontSize: '10px', color: 'var(--text-muted)' } }, 'Call OI'), ceOi, ceChange),
         el('div', {}, el('div', { style: { fontSize: '10px', color: 'var(--text-muted)' } }, 'Put OI'), peOi, peChange)
+      ));
+
+      card.appendChild(el('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: '10px', borderTop: '1px solid var(--border)' } },
+        el('span', { style: { fontSize: '10px', color: 'var(--text-muted)', fontWeight: 500 } }, 'PCR w.r.t OI Δ'),
+        deltaPcrVal
       ));
 
       const spark = el('div', { style: { height: '50px', marginTop: '4px', marginInline: '-4px' } });
       card.appendChild(spark);
       instGrid.appendChild(card);
 
-      _instCardEls[it.instrument] = { card, pill, spotVal, spotSub, pcrLabel, pcrBar, ceOi, ceChange, peOi, peChange, spark };
+      _instCardEls[it.instrument] = { card, pill, spotVal, spotSub, pcrLabel, pcrBar, ceOi, ceChange, peOi, peChange, deltaPcrVal, spark };
     });
   }
 
@@ -164,6 +174,12 @@ export async function mount(container) {
       refs.peOi.textContent = fmtCompact(it.total_pe_oi);
       refs.peChange.className = `mono ${it.pe_oi_change >= 0 ? 'bull' : 'bear'}`;
       refs.peChange.textContent = fmtSigned(it.pe_oi_change, 0) === '—' ? '—' : (it.pe_oi_change >= 0 ? '+' : '') + fmtCompact(it.pe_oi_change);
+
+      // PCR w.r.t OI change
+      const deltaPcr = it.delta_pcr ?? null;
+      const deltaPcrTone = deltaPcr != null ? (deltaPcr >= 1 ? 'bull' : 'bear') : '';
+      refs.deltaPcrVal.className = `mono ${deltaPcrTone}`;
+      refs.deltaPcrVal.textContent = deltaPcr != null ? fmtNum(deltaPcr, 3) : '—';
 
       // Sparkline: create or update
       const pts = (it.spark?.spot || []).map((v, i) => [it.spark.timestamps[i].replace(/([+-]\d{2}:\d{2})$/, ''), v]);

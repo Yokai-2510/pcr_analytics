@@ -1,5 +1,5 @@
 // topbar.js — minimal: brand + centered tabs + status pills
-import { el, fmtClockIST, timeAgo, icon } from './components.js';
+import { el, fmtClockIST, fmtDateClockIST, timeAgo, icon } from './components.js';
 import { store, subscribe } from './store.js';
 
 const TABS = [
@@ -25,7 +25,7 @@ export function mountTopbar(root) {
   );
 
   const marketPill = el('span', { class: 'pill neutral' }, el('span', { class: 'dot' }), 'offline');
-  const clockEl = el('span', { class: 'pill', style: { color: 'var(--text-muted)' } }, fmtClockIST(), ' IST');
+  const clockEl = el('span', { class: 'pill', style: { color: 'var(--text-muted)' } }, fmtDateClockIST(), ' IST');
   const lastFetchEl = el('span', { class: 'mono text-xs dim' }, '—');
   const cog = el('a', { class: 'icon-btn', href: '#settings', title: 'Settings' });
   cog.appendChild(icon('cog'));
@@ -36,7 +36,7 @@ export function mountTopbar(root) {
   root.appendChild(topbar);
 
   setInterval(() => {
-    clockEl.childNodes[0].textContent = fmtClockIST();
+    clockEl.childNodes[0].textContent = fmtDateClockIST();
     if (store.status?.last_fetch) lastFetchEl.textContent = timeAgo(store.status.last_fetch);
   }, 1000);
 
