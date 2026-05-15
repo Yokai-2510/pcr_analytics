@@ -195,7 +195,7 @@ export async function mount(container) {
         ),
         el('div', { style: { borderLeft: '1px solid var(--border)', paddingLeft: '20px' } },
           el('span', { class: 'text-xs muted' }, 'ΔPCR'),
-          el('div', { class: `mono ${deltaPcr != null ? (deltaPcr >= 1 ? 'bull' : 'bear') : ''}`, style: { fontWeight: '700', fontSize: '18px' } }, deltaPcr != null ? fmtNum(deltaPcr, 3) : '—'),
+          el('div', { class: `mono ${deltaPcr != null ? (deltaPcr >= 0 ? 'bull' : 'bear') : ''}`, style: { fontWeight: '700', fontSize: '18px' } }, deltaPcr != null ? fmtNum(deltaPcr, 3) : '—'),
         ),
         el('div', { style: { borderLeft: '1px solid var(--border)', paddingLeft: '20px' } },
           el('span', { class: 'text-xs muted' }, 'Ticks'),
@@ -220,8 +220,52 @@ export async function mount(container) {
   // OI LOGS TAB
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   const oiLogsContent = el('div');
-  buildTabToolbar(oiLogsPanel, 'oi-logs');
+  buildTabToolbar(oiLogsPanel, 'oi-logs', (controls) => {
+    const oiExportBtn = el('button', { class: 'btn secondary sm', onclick: exportOiLogsCSV }, 'Export CSV');
+    controls.append(el('div', { class: 'spacer' }), oiExportBtn);
+  });
   oiLogsPanel.appendChild(oiLogsContent);
+
+  // ── Export OI Logs as CSV ──
+  async function exportOiLogsCSV() {
+    const ts = tabState['oi-logs'];
+    if (!ts.instrument || !ts.date) { toast('Select instrument and date first', 'error'); return; }
+    toast('Exporting OI logs…', 'info');
+    try {
+      const data = await _fetchOiData(ts.instrument, ts.date);
+      if (!data) { toast('No data to export', 'error'); return; }
+      const { summaryRows } = data;
+      const headers = ['Time', 'CE_OI', 'PE_OI', 'PCR', 'Delta_PCR', 'CE_Change', 'PE_Change'];
+      const csvRows = [headers.join(',')];
+      for (let i = 0; i < summaryRows.length; i++) {
+        const r = summaryRows[i];
+        const rowPcr = r.total_pe_oi && r.total_ce_oi ? (r.total_pe_oi / r.total_ce_oi) : 0;
+        const prev = i > 0 ? summaryRows[i - 1] : null;
+        const prevPcr = prev ? (prev.total_pe_oi / prev.total_ce_oi) : rowPcr;
+        const cΔ = prev ? (r.total_ce_oi - prev.total_ce_oi) : 0;
+        const pΔ = prev ? (r.total_pe_oi - prev.total_pe_oi) : 0;
+        const deltaPcr = prev ? (rowPcr - prevPcr) : 0;
+        csvRows.push([
+          r.timestamp,
+          r.total_ce_oi,
+          r.total_pe_oi,
+          rowPcr.toFixed(6),
+          deltaPcr.toFixed(6),
+          cΔ,
+          pΔ,
+        ].join(','));
+      }
+      const blob = new Blob([csvRows.join('\n')], { type: 'text/csv' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `oi-logs-${ts.instrument}-${ts.date}.csv`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+      toast(`Exported ${summaryRows.length} rows`, 'success');
+    } catch (e) {
+      toast('Export failed: ' + e.message, 'error');
+    }
+  }
 
   async function renderOiLogs() {
     oiLogsContent.innerHTML = '<div class="dim" style="padding:24px">Loading OI data…</div>';
