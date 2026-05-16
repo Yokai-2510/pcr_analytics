@@ -1020,6 +1020,12 @@ table.data tbody tr:hover { background: var(--surface-1); }
   .workspace-grid { grid-template-columns: 1fr !important; grid-template-rows: auto !important; height: auto; }
   .modal-split { grid-template-columns: 1fr; }
 }
+@media (max-width: 860px) {
+  /* Indicators tab: stack config panel above results */
+  .tab-panel > div:last-child > div[style*="grid-template-columns: 280px"] {
+    grid-template-columns: 1fr !important;
+  }
+}
 @media (max-width: 720px) {
   .topbar { grid-template-columns: auto 1fr auto; padding: 10px 14px; }
   .topbar .tabs { display: none; }
