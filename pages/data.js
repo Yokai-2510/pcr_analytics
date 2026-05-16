@@ -235,7 +235,7 @@ export async function mount(container) {
       const data = await _fetchOiData(ts.instrument, ts.date);
       if (!data) { toast('No data to export', 'error'); return; }
       const { summaryRows } = data;
-      const headers = ['Time', 'CE_OI', 'PE_OI', 'PCR', 'Delta_PCR', 'CE_Change', 'PE_Change'];
+      const headers = ['Time', 'CE_OI', 'PE_OI', 'PCR', 'Delta_PCR', 'CE_Change', 'PE_Change', 'Signed_PCR', 'Signal'];
       const csvRows = [headers.join(',')];
       for (let i = 0; i < summaryRows.length; i++) {
         const r = summaryRows[i];
@@ -245,6 +245,26 @@ export async function mount(container) {
         const cΔ = prev ? (r.total_ce_oi - prev.total_ce_oi) : 0;
         const pΔ = prev ? (r.total_pe_oi - prev.total_pe_oi) : 0;
         const deltaPcr = prev ? (rowPcr - prevPcr) : 0;
+
+        // Signed PCR
+        const absCe = Math.abs(cΔ);
+        const absPe = Math.abs(pΔ);
+        let signedPcr = '';
+        let signal = '';
+        if (prev && absCe > 0) {
+          const pcrMag = absPe / absCe;
+          let sign;
+          if ((pΔ >= 0 && cΔ >= 0) || (pΔ <= 0 && cΔ <= 0)) {
+            sign = pcrMag > 1 ? 1 : -1;
+          } else {
+            sign = pΔ >= 0 ? 1 : -1;
+          }
+          signedPcr = (sign * pcrMag).toFixed(6);
+          const sp = sign * pcrMag;
+          if (sp > 0) signal = sp >= 1 ? 'Strong Bull' : 'Bull';
+          else signal = sp <= -1 ? 'Strong Bear' : 'Bear';
+        }
+
         csvRows.push([
           r.timestamp,
           r.total_ce_oi,
@@ -253,6 +273,8 @@ export async function mount(container) {
           deltaPcr.toFixed(6),
           cΔ,
           pΔ,
+          signedPcr,
+          signal,
         ].join(','));
       }
       const blob = new Blob([csvRows.join('\n')], { type: 'text/csv' });
@@ -311,7 +333,7 @@ export async function mount(container) {
 
       // ── Time-series table (latest at top) ──
       const t = el('table', { class: 'data' });
-      const cols = ['Time', 'CE OI', 'PE OI', 'PCR', 'ΔPCR', 'CE Δ', 'PE Δ'];
+      const cols = ['Time', 'CE OI', 'PE OI', 'PCR', 'ΔPCR', 'CE Δ', 'PE Δ', 'Signed PCR', 'Signal'];
       const thead = el('thead');
       const hr = el('tr');
       cols.forEach(c => hr.appendChild(el('th', {}, c)));
@@ -333,6 +355,32 @@ export async function mount(container) {
         const cΔ = r.total_ce_oi - prevCe;
         const pΔ = r.total_pe_oi - prevPe;
         const deltaPcr = prevRow ? (rowPcr - prevPcr) : 0;
+
+        // ── Signed PCR (Dr. Vijay Bhilwade methodology) ──
+        // PCR = |PE ΔOI| / |CE ΔOI|
+        // Sign: same-sign → + if PCR>1 else -; diff-sign → sign of PE ΔOI
+        const absCe = Math.abs(cΔ);
+        const absPe = Math.abs(pΔ);
+        let signedPcr = null;
+        let signal = '—';
+        if (prevRow && absCe > 0) {
+          const pcrMag = absPe / absCe;
+          let sign;
+          if ((pΔ >= 0 && cΔ >= 0) || (pΔ <= 0 && cΔ <= 0)) {
+            // Same direction: compare relative strength
+            sign = pcrMag > 1 ? 1 : -1;
+          } else {
+            // Opposite direction: sign follows PE ΔOI
+            sign = pΔ >= 0 ? 1 : -1;
+          }
+          signedPcr = sign * pcrMag;
+          if (signedPcr > 0) {
+            signal = signedPcr >= 1 ? 'Strong Bull' : 'Bull';
+          } else {
+            signal = signedPcr <= -1 ? 'Strong Bear' : 'Bear';
+          }
+        }
+
         const tr = el('tr');
         tr.appendChild(el('td', { class: 'mono' }, fmtTimeIST(r.timestamp)));
         tr.appendChild(el('td', { class: 'mono' }, fmtCompact(r.total_ce_oi)));
@@ -341,6 +389,17 @@ export async function mount(container) {
         tr.appendChild(el('td', { class: `mono ${deltaPcr >= 0 ? 'bull' : 'bear'}` }, (deltaPcr >= 0 ? '+' : '') + fmtNum(deltaPcr, 3)));
         tr.appendChild(el('td', { class: `mono ${cΔ >= 0 ? 'bull' : 'bear'}` }, (cΔ >= 0 ? '+' : '') + fmtCompact(cΔ)));
         tr.appendChild(el('td', { class: `mono ${pΔ >= 0 ? 'bull' : 'bear'}` }, (pΔ >= 0 ? '+' : '') + fmtCompact(pΔ)));
+        // Signed PCR
+        if (signedPcr != null) {
+          const spcrTone = signedPcr > 0 ? 'bull' : signedPcr < 0 ? 'bear' : '';
+          tr.appendChild(el('td', { class: `mono ${spcrTone}`, style: { fontWeight: '600' } }, (signedPcr >= 0 ? '+' : '') + fmtNum(signedPcr, 3)));
+        } else {
+          tr.appendChild(el('td', { class: 'mono dim' }, '—'));
+        }
+        // Signal
+        const sigTone = signal.startsWith('Strong Bull') ? 'bull' : signal === 'Bull' ? 'bull' : signal.startsWith('Strong Bear') ? 'bear' : signal === 'Bear' ? 'bear' : '';
+        const sigClass = sigTone === 'bull' ? 'change-pill bull' : sigTone === 'bear' ? 'change-pill bear' : 'change-pill neutral';
+        tr.appendChild(el('td', {}, el('span', { class: sigClass, style: { fontSize: '10px' } }, signal)));
         tbody.appendChild(tr);
       });
       t.appendChild(tbody);
