@@ -123,18 +123,31 @@
       }
     }
 
-    // global status poll for topbar
+    // global status poll for topbar (suppresses noisy errors)
+    let _statusFailCount = 0;
     async function pollStatus() {
       try {
         const s = await api.status();
         store.status = s.service_status || s;
         store.connected = true;
-      } catch (e) { store.connected = false; }
+        _statusFailCount = 0;
+      } catch (e) {
+        _statusFailCount++;
+        store.connected = false;
+        // Only log after 3 consecutive failures to reduce console noise
+        if (_statusFailCount === 3) console.warn('Backend unreachable — will keep retrying');
+      }
     }
 
-    // boot: if token exists try verify, else show login
+    // boot: if token exists try verify (with timeout), else show login
     if (store.adminToken) {
-      api.verifyAuth().then(() => bootApp()).catch(() => showLogin());
+      const bootTimeout = setTimeout(() => {
+        console.warn('Verify timed out, showing login');
+        showLogin();
+      }, 12000);
+      api.verifyAuth()
+        .then(() => { clearTimeout(bootTimeout); bootApp(); })
+        .catch(() => { clearTimeout(bootTimeout); showLogin(); });
     } else {
       showLogin();
     }

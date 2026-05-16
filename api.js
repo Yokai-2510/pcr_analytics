@@ -2,17 +2,40 @@
 import { store } from './store.js';
 import { toast } from './components.js';
 
+const DEFAULT_TIMEOUT = 15000; // 15s for normal requests
+const AUTH_TIMEOUT = 10000;    // 10s for auth
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = DEFAULT_TIMEOUT) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { ...options, signal: controller.signal });
+    clearTimeout(timer);
+    return res;
+  } catch (err) {
+    clearTimeout(timer);
+    if (err.name === 'AbortError') {
+      throw new Error(`Request timed out after ${timeoutMs / 1000}s — backend may be down`);
+    }
+    throw err;
+  }
+}
+
 export async function fetchJson(path, opts = {}) {
   const url = `${store.apiBase.replace(/\/+$/, '')}${path}`;
   const headers = { ...(opts.headers || {}) };
   if (store.adminToken) headers['X-Admin-Token'] = store.adminToken;
   if (opts.body && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
+
+  const isAuth = path.includes('/auth/') || path.includes('/login');
+  const timeout = isAuth ? AUTH_TIMEOUT : (opts.timeoutMs || DEFAULT_TIMEOUT);
+
   let res;
   try {
-    res = await fetch(url, { ...opts, headers });
+    res = await fetchWithTimeout(url, { ...opts, headers }, timeout);
   } catch (err) {
     store.connected = false;
-    throw new Error(`Network error: ${err.message}`);
+    throw new Error(err.message || `Network error`);
   }
   if (!res.ok) {
     const text = await res.text();
