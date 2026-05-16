@@ -244,7 +244,8 @@ export async function mount(container) {
         const prevPcr = prev ? (prev.total_pe_oi / prev.total_ce_oi) : rowPcr;
         const cΔ = prev ? (r.total_ce_oi - prev.total_ce_oi) : 0;
         const pΔ = prev ? (r.total_pe_oi - prev.total_pe_oi) : 0;
-        const deltaPcr = prev ? (rowPcr - prevPcr) : 0;
+        // ΔPCR = PE ΔOI / CE ΔOI
+        const deltaPcr = (prev && Math.abs(cΔ) > 0) ? (pΔ / cΔ) : 0;
 
         // Signed PCR
         const absCe = Math.abs(cΔ);
@@ -354,7 +355,8 @@ export async function mount(container) {
         const prevPe = prevRow ? prevRow.total_pe_oi : r.total_pe_oi;
         const cΔ = r.total_ce_oi - prevCe;
         const pΔ = r.total_pe_oi - prevPe;
-        const deltaPcr = prevRow ? (rowPcr - prevPcr) : 0;
+        // ΔPCR = PE ΔOI / CE ΔOI (ratio of OI changes, not PCR difference)
+        const deltaPcr = (prevRow && Math.abs(cΔ) > 0) ? (pΔ / cΔ) : 0;
 
         // ── Signed PCR (Dr. Vijay Bhilwade methodology) ──
         // PCR = |PE ΔOI| / |CE ΔOI|
