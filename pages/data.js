@@ -1,8 +1,7 @@
-// pages/data.js — Snapshots data explorer (4-tab: OI Analytics / OI Logs / Indicators / All Logs)
+// pages/data.js — Snapshots data explorer (4-tab: OI Analytics / OI Logs / Entry Signals / All Logs)
 import { el, toast, fmtTimeIST, fmtDateIST, fmtNum, fmtCompact, fmtSigned, fmtPct, icon, Select, DateSelect } from '../components.js';
 import { api } from '../api.js';
 import { store } from '../store.js';
-import { INDICATOR_DEFS, buildSignedPcrSeries, computeAll } from '../indicators.js';
 
 // ── State ──────────────────────────────────────────────────────────────
 let columnsCatalog = null;
@@ -10,14 +9,14 @@ let selectedCols = [];
 let filters = [];
 let searchQuery = '';
 let resampleInterval = 'raw';
-let activeTab = 'oi-analytics'; // 'oi-analytics' | 'oi-logs' | 'indicators' | 'all-logs'
+let activeTab = 'oi-analytics'; // 'oi-analytics' | 'oi-logs' | 'entry-signals' | 'all-logs'
 let pollTimer = null;
 
 // Per-tab instrument/date state so each tab remembers its own selection
 const tabState = {
   'oi-analytics': { instrument: 'nifty', date: new Date().toISOString().slice(0, 10) },
   'oi-logs':      { instrument: 'nifty', date: new Date().toISOString().slice(0, 10) },
-  'indicators':   { instrument: 'nifty', date: new Date().toISOString().slice(0, 10) },
+  'entry-signals':   { instrument: 'nifty', date: new Date().toISOString().slice(0, 10) },
   'all-logs':     { instrument: 'nifty', date: new Date().toISOString().slice(0, 10) },
 };
 
@@ -82,7 +81,7 @@ export async function mount(container) {
   const tabs = [
     { id: 'oi-analytics', label: 'OI Analytics' },
     { id: 'oi-logs', label: 'OI Logs' },
-    { id: 'indicators', label: 'Indicators' },
+    { id: 'entry-signals', label: 'Entry Signals' },
     { id: 'all-logs', label: 'All Logs' },
   ];
   const tabEls = {};
@@ -99,12 +98,12 @@ export async function mount(container) {
   // ── Shared refs for content panels ──
   const oiAnalyticsPanel = el('div', { class: 'tab-panel' });
   const oiLogsPanel = el('div', { class: 'tab-panel' });
-  const indicatorsPanel = el('div', { class: 'tab-panel' });
+  const entrySignalsPanel = el('div', { class: 'tab-panel' });
   const allLogsPanel = el('div', { class: 'tab-panel' });
 
   page.appendChild(oiAnalyticsPanel);
   page.appendChild(oiLogsPanel);
-  page.appendChild(indicatorsPanel);
+  page.appendChild(entrySignalsPanel);
   page.appendChild(allLogsPanel);
 
   // ── State ──
@@ -129,7 +128,7 @@ export async function mount(container) {
         if (tabId === 'all-logs') { state.page = 1; runQuery(); }
         else if (tabId === 'oi-analytics') renderOiAnalytics();
         else if (tabId === 'oi-logs') renderOiLogs();
-        else if (tabId === 'indicators') renderIndicators();
+        else if (tabId === 'entry-signals') renderEntrySignals();
       },
     });
 
@@ -141,7 +140,7 @@ export async function mount(container) {
         if (tabId === 'all-logs') { state.page = 1; runQuery(); }
         else if (tabId === 'oi-analytics') renderOiAnalytics();
         else if (tabId === 'oi-logs') renderOiLogs();
-        else if (tabId === 'indicators') renderIndicators();
+        else if (tabId === 'entry-signals') renderEntrySignals();
       },
       placeholder: 'All dates',
       width: '150px',
@@ -165,12 +164,12 @@ export async function mount(container) {
     Object.entries(tabEls).forEach(([id, btn]) => btn.classList.toggle('active', id === tabId));
     oiAnalyticsPanel.style.display = tabId === 'oi-analytics' ? '' : 'none';
     oiLogsPanel.style.display = tabId === 'oi-logs' ? '' : 'none';
-    indicatorsPanel.style.display = tabId === 'indicators' ? '' : 'none';
+    entrySignalsPanel.style.display = tabId === 'entry-signals' ? '' : 'none';
     allLogsPanel.style.display = tabId === 'all-logs' ? '' : 'none';
     if (tabId === 'all-logs') renderBody();
     else if (tabId === 'oi-analytics') renderOiAnalytics();
     else if (tabId === 'oi-logs') renderOiLogs();
-    else if (tabId === 'indicators') renderIndicators();
+    else if (tabId === 'entry-signals') renderEntrySignals();
   }
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -424,238 +423,102 @@ export async function mount(container) {
   }
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  // INDICATORS TAB
+  // ENTRY SIGNALS TAB
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  const indicatorsContent = el('div');
-  buildTabToolbar(indicatorsPanel, 'indicators');
-  indicatorsPanel.appendChild(indicatorsContent);
+  const entrySignalsContent = el('div');
+  buildTabToolbar(entrySignalsPanel, 'entry-signals');
+  entrySignalsPanel.appendChild(entrySignalsContent);
 
-  // Indicator params state (persisted to localStorage)
-  let indicatorParams = {};
-  try { indicatorParams = JSON.parse(localStorage.getItem('indicatorParams') || '{}'); } catch {}
-  // Apply defaults for missing
-  for (const def of INDICATOR_DEFS) {
-    if (!indicatorParams[def.id]) {
-      indicatorParams[def.id] = {};
-      for (const c of def.configs) {
-        indicatorParams[def.id][c.key] = c.default;
-      }
-    }
-  }
-
-  function saveIndicatorParams() {
-    localStorage.setItem('indicatorParams', JSON.stringify(indicatorParams));
-  }
-
-  async function renderIndicators(silent = false) {
-    if (!silent) indicatorsContent.innerHTML = '<div class="dim" style="padding:24px">Loading…</div>';
-    const ts = tabState['indicators'];
+  async function renderEntrySignals(silent = false) {
+    if (!silent) entrySignalsContent.innerHTML = '<div class="dim" style="padding:24px">Loading entry signals…</div>';
+    const ts = tabState['entry-signals'];
     if (!ts.instrument || !ts.date) {
-      indicatorsContent.innerHTML = '<div class="empty-state">Select a date to view indicators.</div>';
+      entrySignalsContent.innerHTML = '<div class="empty-state">Select a date to view entry signals.</div>';
       return;
     }
     try {
-      const data = await _fetchOiData(ts.instrument, ts.date);
-      if (!data || !data.summaryRows.length) {
-        indicatorsContent.innerHTML = '<div class="empty-state">No OI data for this date.</div>';
+      const data = await api.computedTicks(ts.instrument, ts.date);
+      const ticks = Array.isArray(data) ? data : (data.ticks || data.data || data.rows || []);
+      if (!ticks.length) {
+        entrySignalsContent.innerHTML = '<div class="empty-state">No computed ticks for this date.</div>';
         return;
       }
-      const series = buildSignedPcrSeries(data.summaryRows);
-      const results = computeAll(series, indicatorParams);
+      // Reverse chronological (latest at top)
+      const rows = [...ticks].reverse();
 
-      indicatorsContent.innerHTML = '';
+      entrySignalsContent.innerHTML = '';
 
-      // ── Config panel (left) + Results table (right) ──
-      const layout = el('div', { style: { display: 'grid', gridTemplateColumns: '280px 1fr', gap: '16px', alignItems: 'start' } });
+      // Summary strip
+      const latest = rows[0];
+      const buyCount = rows.filter(r => (r.signal || '').toUpperCase() === 'BUY').length;
+      const sellCount = rows.filter(r => (r.signal || '').toUpperCase() === 'SELL').length;
+      const crossoverCount = rows.filter(r => r.crossover === true || r.crossover === 'TRUE' || r.crossover === 'true').length;
 
-      // Config panel
-      const cfgPanel = el('div', { class: 'card', style: { position: 'sticky', top: '72px' } });
-      cfgPanel.appendChild(el('div', { style: { fontSize: '14px', fontWeight: '600', marginBottom: '14px' } }, 'Indicator Config'));
-
-      for (const def of INDICATOR_DEFS) {
-        const section = el('div', { style: { marginBottom: '14px', paddingBottom: '14px', borderBottom: '1px solid var(--border)' } });
-        section.appendChild(el('div', { style: { fontSize: '12px', fontWeight: '600', color: 'var(--accent)', marginBottom: '4px' } }, def.name));
-        section.appendChild(el('div', { class: 'text-xs dim', style: { marginBottom: '8px' } }, def.description));
-
-        for (const cfg of def.configs) {
-          const currentVal = indicatorParams[def.id]?.[cfg.key] ?? cfg.default;
-          const input = el('input', {
-            type: 'number', min: String(cfg.min), max: String(cfg.max),
-            step: String(cfg.step || 1), value: String(currentVal),
-            style: { width: '80px', height: '28px', fontSize: '11px' },
-          });
-          input.addEventListener('change', () => {
-            let v = parseFloat(input.value);
-            if (isNaN(v)) v = cfg.default;
-            v = Math.max(cfg.min, Math.min(cfg.max, v));
-            input.value = String(v);
-            indicatorParams[def.id][cfg.key] = v;
-            saveIndicatorParams();
-            renderIndicatorResults(series, results = computeAll(series, indicatorParams));
-          });
-          const row = el('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', marginTop: '4px' } },
-            el('span', { class: 'label', style: { minWidth: '100px' } }, cfg.label), input
-          );
-          section.appendChild(row);
-        }
-        cfgPanel.appendChild(section);
-      }
-      layout.appendChild(cfgPanel);
-
-      // Results area
-      const resultsArea = el('div');
-      layout.appendChild(resultsArea);
-      indicatorsContent.appendChild(layout);
-
-      renderIndicatorResults(series, results);
-
-    } catch (e) {
-      if (!silent) indicatorsContent.innerHTML = `<div class="empty-state"><span class="bear">Failed</span><span class="text-xs mono dim">${e.message}</span></div>`;
-    }
-  }
-
-  function renderIndicatorResults(series, results) {
-    const resultsArea = indicatorsContent.querySelector('div:last-child');
-    if (!resultsArea) return;
-    resultsArea.innerHTML = '';
-
-    // Summary strip
-    const latest = series[series.length - 1];
-    const strip = el('div', { class: 'card', style: { display: 'flex', gap: '24px', alignItems: 'center', flexWrap: 'wrap', padding: '14px 20px', marginBottom: '16px' } },
-      el('div', {},
-        el('span', { class: 'text-xs muted' }, 'Latest Signed PCR'),
-        el('div', { class: `mono ${latest?.signedPcr > 0 ? 'bull' : latest?.signedPcr < 0 ? 'bear' : ''}`, style: { fontWeight: '700', fontSize: '18px' } },
-          latest?.signedPcr != null ? (latest.signedPcr >= 0 ? '+' : '') + latest.signedPcr.toFixed(3) : '—'
-        ),
-      ),
-      el('div', { style: { borderLeft: '1px solid var(--border)', paddingLeft: '20px' } },
-        el('span', { class: 'text-xs muted' }, 'Data Points'),
-        el('div', { class: 'mono', style: { fontWeight: '600' } }, String(series.filter(d => d.signedPcr != null).length)),
-      ),
-    );
-    resultsArea.appendChild(strip);
-
-    // One table per indicator
-    for (const def of INDICATOR_DEFS) {
-      const data = results[def.id];
-      if (!data) continue;
-
-      const card = el('div', { class: 'card', style: { marginBottom: '12px' } });
-      const header = el('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' } },
+      const summaryStrip = el('div', { class: 'card', style: { display: 'flex', gap: '28px', alignItems: 'center', flexWrap: 'wrap', padding: '14px 20px', marginBottom: '16px' } },
         el('div', {},
-          el('div', { style: { fontSize: '13px', fontWeight: '600' } }, def.name),
-          el('div', { class: 'text-xs dim' }, def.description),
+          el('span', { class: 'text-xs muted' }, 'Ticks'),
+          el('div', { class: 'mono', style: { fontWeight: '600', fontSize: '16px' } }, String(rows.length)),
+        ),
+        el('div', { style: { borderLeft: '1px solid var(--border)', paddingLeft: '20px' } },
+          el('span', { class: 'text-xs muted' }, 'BUY Signals'),
+          el('div', { class: 'mono bull', style: { fontWeight: '700', fontSize: '16px' } }, String(buyCount)),
+        ),
+        el('div', { style: { borderLeft: '1px solid var(--border)', paddingLeft: '20px' } },
+          el('span', { class: 'text-xs muted' }, 'SELL Signals'),
+          el('div', { class: 'mono bear', style: { fontWeight: '700', fontSize: '16px' } }, String(sellCount)),
+        ),
+        el('div', { style: { borderLeft: '1px solid var(--border)', paddingLeft: '20px' } },
+          el('span', { class: 'text-xs muted' }, 'Crossovers'),
+          el('div', { class: 'mono', style: { fontWeight: '600', fontSize: '16px', color: 'var(--accent)' } }, String(crossoverCount)),
         ),
       );
-      card.appendChild(header);
+      entrySignalsContent.appendChild(summaryStrip);
 
-      const cfg = {};
-      for (const c of def.configs) {
-        cfg[c.key] = indicatorParams[def.id]?.[c.key] ?? c.default;
-      }
-      const cfgStr = Object.entries(cfg).map(([k, v]) => `${k}=${v}`).join(', ');
-      card.appendChild(el('div', { class: 'mono text-xs dim', style: { marginBottom: '8px' } }, `Config: ${cfgStr}`));
+      // Table
+      const t = el('table', { class: 'data' });
+      const cols = ['Timestamp', 'CE OI Change', 'PE OI Change', 'CE Cumulative', 'PE Cumulative', 'Difference (PE-CE)', 'Signal', 'Crossover'];
+      const thead = el('thead');
+      const hr = el('tr');
+      cols.forEach(c => hr.appendChild(el('th', {}, c)));
+      thead.appendChild(hr);
+      t.appendChild(thead);
 
-      if (def.outputType === 'bands') {
-        // Bollinger / StdDev bands: show latest values + signal
-        const bandsData = data; // { upper, middle, lower, signals }
-        const lastIdx = series.length - 1;
-        const latestUpper = bandsData.upper[lastIdx]?.value;
-        const latestMiddle = bandsData.middle[lastIdx]?.value;
-        const latestLower = bandsData.lower[lastIdx]?.value;
-        const latestSignal = bandsData.signals[lastIdx];
+      const tbody = el('tbody');
+      rows.forEach(r => {
+        const tr = el('tr');
+        // Timestamp
+        tr.appendChild(el('td', { class: 'mono' }, fmtTimeIST(r.timestamp)));
+        // CE OI Change
+        const ceChg = r.ce_oi_change ?? r.ce_oi_chg ?? 0;
+        tr.appendChild(el('td', { class: `mono ${ceChg >= 0 ? 'bull' : 'bear'}` }, fmtCompact(ceChg)));
+        // PE OI Change
+        const peChg = r.pe_oi_change ?? r.pe_oi_chg ?? 0;
+        tr.appendChild(el('td', { class: `mono ${peChg >= 0 ? 'bull' : 'bear'}` }, fmtCompact(peChg)));
+        // CE Cumulative
+        const ceCumm = r.ce_oi_cumm_change ?? r.ce_cumulative ?? r.ce_oi_cumm ?? 0;
+        tr.appendChild(el('td', { class: `mono ${ceCumm >= 0 ? 'bull' : 'bear'}` }, fmtCompact(ceCumm)));
+        // PE Cumulative
+        const peCumm = r.pe_oi_cumm_change ?? r.pe_cumulative ?? r.pe_oi_cumm ?? 0;
+        tr.appendChild(el('td', { class: `mono ${peCumm >= 0 ? 'bull' : 'bear'}` }, fmtCompact(peCumm)));
+        // Difference (PE - CE)
+        const diff = peCumm - ceCumm;
+        tr.appendChild(el('td', { class: `mono ${diff >= 0 ? 'bull' : 'bear'}`, style: { fontWeight: '600' } }, (diff >= 0 ? '+' : '') + fmtCompact(diff)));
+        // Signal (colored pill)
+        const signal = (r.signal || '').toUpperCase();
+        const sigTone = signal === 'BUY' ? 'bull' : signal === 'SELL' ? 'bear' : 'neutral';
+        const sigLabel = signal === 'BUY' ? 'BUY' : signal === 'SELL' ? 'SELL' : signal || '—';
+        tr.appendChild(el('td', {}, el('span', { class: `change-pill ${sigTone}`, style: { fontSize: '10px' } }, sigLabel)));
+        // Crossover
+        const crossover = r.crossover === true || r.crossover === 'TRUE' || r.crossover === 'true';
+        tr.appendChild(el('td', { class: 'mono', style: { fontWeight: crossover ? '700' : '400', color: crossover ? 'var(--accent)' : 'var(--text-muted)' } }, crossover ? 'TRUE' : 'FALSE'));
+        tbody.appendChild(tr);
+      });
+      t.appendChild(tbody);
+      entrySignalsContent.appendChild(el('div', { class: 'data-grid-wrap' }, t));
 
-        const valsRow = el('div', { style: { display: 'flex', gap: '20px', marginBottom: '8px', flexWrap: 'wrap' } },
-          bandValChip('Upper', latestUpper, 'var(--bear)'),
-          bandValChip('Middle', latestMiddle, 'var(--text-muted)'),
-          bandValChip('Lower', latestLower, 'var(--bull)'),
-          signalChip(latestSignal),
-        );
-        card.appendChild(valsRow);
-
-        // Table: recent values (last 15)
-        const t = el('table', { class: 'data' });
-        t.appendChild(el('thead', {}, el('tr', {},
-          el('th', {}, 'Time'), el('th', {}, 'Signed PCR'), el('th', {}, 'Upper'), el('th', {}, 'Middle'), el('th', {}, 'Lower'), el('th', {}, 'Signal')
-        )));
-        const tbody = el('tbody');
-        const start = Math.max(0, series.length - 15);
-        for (let i = series.length - 1; i >= start; i--) {
-          const d = series[i];
-          const tr = el('tr');
-          tr.appendChild(el('td', { class: 'mono' }, fmtTimeIST(d.timestamp)));
-          tr.appendChild(el('td', { class: `mono ${d.signedPcr > 0 ? 'bull' : d.signedPcr < 0 ? 'bear' : ''}` },
-            d.signedPcr != null ? d.signedPcr.toFixed(3) : '—'));
-          tr.appendChild(el('td', { class: 'mono' }, bandsData.upper[i]?.value != null ? bandsData.upper[i].value.toFixed(3) : '—'));
-          tr.appendChild(el('td', { class: 'mono' }, bandsData.middle[i]?.value != null ? bandsData.middle[i].value.toFixed(3) : '—'));
-          tr.appendChild(el('td', { class: 'mono' }, bandsData.lower[i]?.value != null ? bandsData.lower[i].value.toFixed(3) : '—'));
-          tr.appendChild(el('td', {}, signalChip(bandsData.signals[i])));
-          tbody.appendChild(tr);
-        }
-        t.appendChild(tbody);
-        card.appendChild(el('div', { class: 'data-grid-wrap', style: { maxHeight: '320px' } }, t));
-
-      } else {
-        // Single-series indicator: show latest value + signal
-        const lastIdx = series.length - 1;
-        const latestVal = data[lastIdx]?.value;
-        const latestSignal = data[lastIdx]?.signal;
-
-        const valsRow = el('div', { style: { display: 'flex', gap: '20px', marginBottom: '8px', flexWrap: 'wrap' } },
-          valChip(def.name, latestVal, def),
-          def.hasSignal ? signalChip(latestSignal) : null,
-        );
-        card.appendChild(valsRow);
-
-        // Table: recent values (last 15)
-        const t = el('table', { class: 'data' });
-        const cols = ['Time', 'Signed PCR', def.name];
-        if (def.hasSignal) cols.push('Signal');
-        t.appendChild(el('thead', {}, el('tr', {}, ...cols.map(c => el('th', {}, c)))));
-        const tbody = el('tbody');
-        const start = Math.max(0, series.length - 15);
-        for (let i = series.length - 1; i >= start; i--) {
-          const d = series[i];
-          const v = data[i];
-          const tr = el('tr');
-          tr.appendChild(el('td', { class: 'mono' }, fmtTimeIST(d.timestamp)));
-          tr.appendChild(el('td', { class: `mono ${d.signedPcr > 0 ? 'bull' : d.signedPcr < 0 ? 'bear' : ''}` },
-            d.signedPcr != null ? d.signedPcr.toFixed(3) : '—'));
-          tr.appendChild(el('td', { class: 'mono' }, v?.value != null ? v.value.toFixed(4) : '—'));
-          if (def.hasSignal) tr.appendChild(el('td', {}, signalChip(v?.signal)));
-          tbody.appendChild(tr);
-        }
-        t.appendChild(tbody);
-        card.appendChild(el('div', { class: 'data-grid-wrap', style: { maxHeight: '320px' } }, t));
-      }
-
-      resultsArea.appendChild(card);
+    } catch (e) {
+      if (!silent) entrySignalsContent.innerHTML = `<div class="empty-state"><span class="bear">Failed</span><span class="text-xs mono dim">${e.message}</span></div>`;
     }
-  }
-
-  function valChip(label, value, def) {
-    const tone = def.id === 'rsi' ? (value >= 70 ? 'bear' : value <= 30 ? 'bull' : '') :
-                 def.id === 'zscore' ? (value >= 2 ? 'bear' : value <= -2 ? 'bull' : '') : '';
-    return el('div', { class: 'card', style: { padding: '10px 14px', minWidth: '100px' } },
-      el('span', { class: 'text-xs muted' }, label),
-      el('div', { class: `mono ${tone}`, style: { fontWeight: '700', fontSize: '16px' } },
-        value != null ? value.toFixed(4) : '—'),
-    );
-  }
-
-  function bandValChip(label, value, color) {
-    return el('div', { class: 'card', style: { padding: '10px 14px', minWidth: '80px' } },
-      el('span', { class: 'text-xs muted' }, label),
-      el('div', { class: 'mono', style: { fontWeight: '600', fontSize: '14px', color } },
-        value != null ? value.toFixed(3) : '—'),
-    );
-  }
-
-  function signalChip(signal) {
-    if (!signal) return el('span', { class: 'change-pill neutral' }, '—');
-    const tone = signal.includes('Bull') || signal.includes('Oversold') || signal.includes('Low') || signal.includes('Below') ? 'bull' :
-                 signal.includes('Bear') || signal.includes('Overbought') || signal.includes('High') || signal.includes('Above') ? 'bear' : 'neutral';
-    return el('span', { class: `change-pill ${tone}` }, signal);
   }
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1031,7 +894,7 @@ export async function mount(container) {
     if (activeTab === 'all-logs') runQuery(true);
     else if (activeTab === 'oi-analytics') renderOiAnalytics(true);
     else if (activeTab === 'oi-logs') renderOiLogs(true);
-    else if (activeTab === 'indicators') renderIndicators(true);
+    else if (activeTab === 'entry-signals') renderEntrySignals(true);
   }, 60000);
 }
 
