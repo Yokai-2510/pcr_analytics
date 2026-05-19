@@ -180,9 +180,9 @@ export async function mount(container) {
     setTimeout(() => loadAndRender(canvas, cfg, chart.id), 0);
   }
 
-  async function loadAndRender(div, cfg, id) {
+  async function loadAndRender(div, cfg, id, silent = false) {
     try {
-      const body = {
+      const reqBody = {
         instrument: cfg.instrument,
         metrics: cfg.metrics?.length ? cfg.metrics : ['pcr'],
         strike_mode: cfg.strike_mode || 'aggregate',
@@ -191,11 +191,11 @@ export async function mount(container) {
         strikes: cfg.strikes || [],
         date: cfg.date || undefined,
       };
-      const payload = await api.chartData(body);
+      const payload = await api.chartData(reqBody);
       const inst = chartInstances[id] || (chartInstances[id] = echarts.init(div, null, { renderer: 'canvas' }));
       renderEchart(inst, payload, cfg.chart_type || 'line');
     } catch (e) {
-      div.innerHTML = `<div class="empty-state"><span class="bear">Chart error</span><span class="text-xs mono dim">${e.message}</span></div>`;
+      if (!silent) div.innerHTML = `<div class="empty-state"><span class="bear">Chart error</span><span class="text-xs mono dim">${e.message}</span></div>`;
     }
   }
 
@@ -203,26 +203,24 @@ export async function mount(container) {
   buildToolbar();
   render();
   window.addEventListener('resize', resize);
-  pollTimer = setInterval(() => { refreshData(); }, 60000);
-}
-
-// Refresh data for existing charts without rebuilding DOM
-function refreshData() {
-  if (mode === 'workspace') {
-    const layout = localStorage.getItem('charts.layout') || '2×2';
-    const [cols, rows] = layout.split('×').map(Number);
-    const charts = store.savedCharts.slice(0, cols * rows);
-    charts.forEach(c => {
-      const div = body.querySelector(`.echart[data-chart-id="${c.id}"]`);
-      if (div) loadAndRender(div, c.config, c.id);
-    });
-  } else if (activeTab) {
-    const chart = store.savedCharts.find(c => c.id === activeTab);
-    if (chart) {
-      const div = body.querySelector(`.echart[data-chart-id="${chart.id}"]`);
-      if (div) loadAndRender(div, chart.config, chart.id);
+  pollTimer = setInterval(() => {
+    // Refresh chart data in-place without rebuilding DOM
+    if (mode === 'workspace') {
+      const layout = localStorage.getItem('charts.layout') || '2×2';
+      const [cols, rows] = layout.split('×').map(Number);
+      const charts = store.savedCharts.slice(0, cols * rows);
+      charts.forEach(c => {
+        const div = body.querySelector(`.echart[data-chart-id="${c.id}"]`);
+        if (div && c.config) loadAndRender(div, c.config, c.id, true);
+      });
+    } else if (activeTab) {
+      const chart = store.savedCharts.find(c => c.id === activeTab);
+      if (chart) {
+        const div = body.querySelector(`.echart[data-chart-id="${chart.id}"]`);
+        if (div && chart.config) loadAndRender(div, chart.config, chart.id, true);
+      }
     }
-  }
+  }, 60000);
 }
 
 function resize() {
@@ -347,7 +345,7 @@ function openEditor(existing) {
       ));
     });
   }
-  const rightPanel = el('div', { class: 'panel' },
+  const rightPanel = el('div', { class: 'panel', style: { display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' } },
     el('div', { class: 'panel-title' }, 'Metrics'),
     metricBox
   );
@@ -369,14 +367,14 @@ function openEditor(existing) {
     chartDateSelect.refresh(c.instrument || cfg.instrument);
   });
 
-  const wrap = el('div', {},
+  const wrap = el('div', { style: { display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, overflow: 'hidden' } },
     el('h2', {}, existing ? 'Edit chart' : 'New chart'),
     el('div', { class: 'row gap-12 mb-8' },
       el('div', { class: 'field', style: { flex: 2, margin: 0 } }, el('span', { class: 'label' }, 'Name'), nameInput),
       el('div', { class: 'field', style: { flex: 1, margin: 0 } }, el('span', { class: 'label' }, 'Preset'), presetSel),
     ),
     el('div', { class: 'modal-split mt-12' }, leftPanel, rightPanel),
-    el('div', { class: 'row gap-8 mt-12', style: { justifyContent: 'flex-end' } },
+    el('div', { class: 'row gap-8 mt-12', style: { justifyContent: 'flex-end', flexShrink: 0 } },
       el('button', { class: 'btn ghost sm', onclick: () => m.close() }, 'Cancel'),
       el('button', { class: 'btn primary sm', onclick: async () => {
         const newCfg = {

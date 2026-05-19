@@ -592,10 +592,12 @@ table.data tbody tr:hover { background: var(--surface-1); }
   max-width: 860px;
   width: 100%;
   max-height: 88vh;
-  overflow-y: auto;
+  overflow: hidden;
   padding: 20px 22px;
   box-shadow: var(--shadow-elevated);
   animation: modalPop 240ms var(--ease);
+  display: flex;
+  flex-direction: column;
 }
 @keyframes modalPop {
   from { opacity: 0; transform: scale(0.96) translateY(8px); }
@@ -607,12 +609,17 @@ table.data tbody tr:hover { background: var(--surface-1); }
   display: grid;
   grid-template-columns: minmax(220px, 0.85fr) minmax(280px, 1.35fr);
   gap: 14px;
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
 }
 .modal-split .panel {
   background: rgba(0,0,0,0.25);
   border: 1px solid var(--border);
   border-radius: var(--r);
   padding: 14px;
+  overflow-y: auto;
+  min-height: 0;
 }
 .modal-split .panel-title {
   font-size: 11px;
@@ -946,8 +953,9 @@ table.data tbody tr:hover { background: var(--surface-1); }
   border: 1px solid var(--border);
   border-radius: var(--r-sm);
   padding: 6px;
-  max-height: 420px;
   overflow-y: auto;
+  flex: 1;
+  min-height: 0;
 }
 .metric-picker .metric-row { padding: 6px 6px; }
 .metric-picker .metric-row strong { font-size: 12px; }

@@ -180,8 +180,8 @@ export async function mount(container) {
   buildTabToolbar(oiAnalyticsPanel, 'oi-analytics');
   oiAnalyticsPanel.appendChild(oiAnalyticsContent);
 
-  async function renderOiAnalytics() {
-    oiAnalyticsContent.innerHTML = '<div class="dim" style="padding:24px">Loading OI data…</div>';
+  async function renderOiAnalytics(silent = false) {
+    if (!silent) oiAnalyticsContent.innerHTML = '<div class="dim" style="padding:24px">Loading OI data…</div>';
     const ts = tabState['oi-analytics'];
     if (!ts.instrument || !ts.date) {
       oiAnalyticsContent.innerHTML = '<div class="empty-state">Select a date to view OI Analytics.</div>';
@@ -221,7 +221,7 @@ export async function mount(container) {
       oiAnalyticsContent.appendChild(summaryStrip);
       oiAnalyticsContent.appendChild(cardsRow);
     } catch (e) {
-      oiAnalyticsContent.innerHTML = `<div class="empty-state"><span class="bear">Failed</span><span class="text-xs mono dim">${e.message}</span></div>`;
+      if (!silent) oiAnalyticsContent.innerHTML = `<div class="empty-state"><span class="bear">Failed</span><span class="text-xs mono dim">${e.message}</span></div>`;
     }
   }
 
@@ -299,8 +299,8 @@ export async function mount(container) {
     }
   }
 
-  async function renderOiLogs() {
-    oiLogsContent.innerHTML = '<div class="dim" style="padding:24px">Loading OI data…</div>';
+  async function renderOiLogs(silent = false) {
+    if (!silent) oiLogsContent.innerHTML = '<div class="dim" style="padding:24px">Loading OI data…</div>';
     const ts = tabState['oi-logs'];
     if (!ts.instrument || !ts.date) {
       oiLogsContent.innerHTML = '<div class="empty-state">Select a date to view OI Logs.</div>';
@@ -419,7 +419,7 @@ export async function mount(container) {
       oiLogsContent.appendChild(miniSummary);
       oiLogsContent.appendChild(el('div', { class: 'data-grid-wrap' }, t));
     } catch (e) {
-      oiLogsContent.innerHTML = `<div class="empty-state"><span class="bear">Failed</span><span class="text-xs mono dim">${e.message}</span></div>`;
+      if (!silent) oiLogsContent.innerHTML = `<div class="empty-state"><span class="bear">Failed</span><span class="text-xs mono dim">${e.message}</span></div>`;
     }
   }
 
@@ -447,8 +447,8 @@ export async function mount(container) {
     localStorage.setItem('indicatorParams', JSON.stringify(indicatorParams));
   }
 
-  async function renderIndicators() {
-    indicatorsContent.innerHTML = '<div class="dim" style="padding:24px">Loading…</div>';
+  async function renderIndicators(silent = false) {
+    if (!silent) indicatorsContent.innerHTML = '<div class="dim" style="padding:24px">Loading…</div>';
     const ts = tabState['indicators'];
     if (!ts.instrument || !ts.date) {
       indicatorsContent.innerHTML = '<div class="empty-state">Select a date to view indicators.</div>';
@@ -510,7 +510,7 @@ export async function mount(container) {
       renderIndicatorResults(series, results);
 
     } catch (e) {
-      indicatorsContent.innerHTML = `<div class="empty-state"><span class="bear">Failed</span><span class="text-xs mono dim">${e.message}</span></div>`;
+      if (!silent) indicatorsContent.innerHTML = `<div class="empty-state"><span class="bear">Failed</span><span class="text-xs mono dim">${e.message}</span></div>`;
     }
   }
 
@@ -798,8 +798,8 @@ export async function mount(container) {
   }
 
   // ── Main query (All Logs) ──
-  async function runQuery() {
-    allLogsTable.innerHTML = '<tbody><tr><td colspan="20" class="dim">Loading…</td></tr></tbody>';
+  async function runQuery(silent = false) {
+    if (!silent) allLogsTable.innerHTML = '<tbody><tr><td colspan="20" class="dim">Loading…</td></tr></tbody>';
     const ts = tabState['all-logs'];
     const body = {
       instrument: ts.instrument,
@@ -836,8 +836,10 @@ export async function mount(container) {
       renderChips();
       renderBody();
     } catch (e) {
-      allLogsTable.innerHTML = '';
-      allLogsTableWrap.innerHTML = `<div class="empty-state"><span class="bear">Query failed</span><span class="text-xs mono dim">${e.message}</span></div>`;
+      if (!silent) {
+        allLogsTable.innerHTML = '';
+        allLogsTableWrap.innerHTML = `<div class="empty-state"><span class="bear">Query failed</span><span class="text-xs mono dim">${e.message}</span></div>`;
+      }
     }
   }
 
@@ -1026,10 +1028,10 @@ export async function mount(container) {
   // ── Initial load ──
   switchTab(activeTab);
   pollTimer = setInterval(() => {
-    if (activeTab === 'all-logs') runQuery();
-    else if (activeTab === 'oi-analytics') renderOiAnalytics();
-    else if (activeTab === 'oi-logs') renderOiLogs();
-    else if (activeTab === 'indicators') renderIndicators();
+    if (activeTab === 'all-logs') runQuery(true);
+    else if (activeTab === 'oi-analytics') renderOiAnalytics(true);
+    else if (activeTab === 'oi-logs') renderOiLogs(true);
+    else if (activeTab === 'indicators') renderIndicators(true);
   }, 60000);
 }
 
