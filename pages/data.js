@@ -321,7 +321,26 @@ export async function mount(container) {
       // ── Quick summary cards ──
       const pcr = latest.total_pe_oi && latest.total_ce_oi ? (latest.total_pe_oi / latest.total_ce_oi) : 0;
 
-      const miniSummary = el('div', { style: { display: 'flex', gap: '16px', marginBottom: '16px', flexWrap: 'wrap' } },
+      // Compute latest change values for second row of cards
+      const origSorted = [...summaryRows]; // ascending
+      const prevLatest = origSorted.length > 1 ? origSorted[origSorted.length - 2] : null;
+      const latestCeChg = prevLatest ? (latest.total_ce_oi - prevLatest.total_ce_oi) : 0;
+      const latestPeChg = prevLatest ? (latest.total_pe_oi - prevLatest.total_pe_oi) : 0;
+      const latestDeltaPcr = (prevLatest && Math.abs(latestCeChg) > 0) ? (latestPeChg / latestCeChg) : 0;
+      // Signed PCR
+      let latestSignedPcr = null;
+      if (prevLatest && Math.abs(latestCeChg) > 0) {
+        const mag = Math.abs(latestPeChg) / Math.abs(latestCeChg);
+        let sign;
+        if ((latestPeChg >= 0 && latestCeChg >= 0) || (latestPeChg <= 0 && latestCeChg <= 0)) {
+          sign = mag > 1 ? 1 : -1;
+        } else {
+          sign = latestPeChg >= 0 ? 1 : -1;
+        }
+        latestSignedPcr = sign * mag;
+      }
+
+      const miniSummary = el('div', { style: { display: 'flex', gap: '16px', marginBottom: '12px', flexWrap: 'wrap' } },
         el('div', { class: 'card', style: { padding: '12px 16px', flex: '1', minWidth: '120px' } },
           el('span', { class: 'text-xs muted' }, 'Latest CE OI'),
           el('div', { class: 'mono', style: { fontWeight: '700', fontSize: '16px' } }, fmtCompact(latest.total_ce_oi)),
@@ -340,6 +359,26 @@ export async function mount(container) {
         ),
       );
 
+      // ── Second row: Change metrics ──
+      const miniSummary2 = el('div', { style: { display: 'flex', gap: '16px', marginBottom: '16px', flexWrap: 'wrap' } },
+        el('div', { class: 'card', style: { padding: '12px 16px', flex: '1', minWidth: '120px' } },
+          el('span', { class: 'text-xs muted' }, 'CE OI Change'),
+          el('div', { class: `mono ${latestCeChg >= 0 ? 'bull' : 'bear'}`, style: { fontWeight: '700', fontSize: '16px' } }, (latestCeChg >= 0 ? '+' : '') + fmtCompact(latestCeChg)),
+        ),
+        el('div', { class: 'card', style: { padding: '12px 16px', flex: '1', minWidth: '120px' } },
+          el('span', { class: 'text-xs muted' }, 'PE OI Change'),
+          el('div', { class: `mono ${latestPeChg >= 0 ? 'bull' : 'bear'}`, style: { fontWeight: '700', fontSize: '16px' } }, (latestPeChg >= 0 ? '+' : '') + fmtCompact(latestPeChg)),
+        ),
+        el('div', { class: 'card', style: { padding: '12px 16px', flex: '1', minWidth: '120px' } },
+          el('span', { class: 'text-xs muted' }, 'Delta PCR'),
+          el('div', { class: `mono ${latestDeltaPcr >= 0 ? 'bull' : 'bear'}`, style: { fontWeight: '700', fontSize: '16px' } }, (latestDeltaPcr >= 0 ? '+' : '') + fmtNum(latestDeltaPcr, 3)),
+        ),
+        el('div', { class: 'card', style: { padding: '12px 16px', flex: '1', minWidth: '120px' } },
+          el('span', { class: 'text-xs muted' }, 'Signed PCR'),
+          el('div', { class: `mono ${latestSignedPcr != null ? (latestSignedPcr >= 0 ? 'bull' : 'bear') : ''}`, style: { fontWeight: '700', fontSize: '16px' } }, latestSignedPcr != null ? ((latestSignedPcr >= 0 ? '+' : '') + fmtNum(latestSignedPcr, 3)) : '—'),
+        ),
+      );
+
       // ── Time-series table (latest at top) ──
       const t = el('table', { class: 'data' });
       const cols = ['Time', 'CE OI', 'PE OI', 'PCR', 'ΔPCR', 'CE Δ', 'PE Δ', 'Signed PCR', 'Signal'];
@@ -351,7 +390,6 @@ export async function mount(container) {
 
       const tbody = el('tbody');
       // Walk rows top-down (latest first), compute deltas against previous row
-      const origSorted = [...summaryRows]; // ascending
       const origIdx = (r) => origSorted.indexOf(r);
 
       rows.forEach((r, displayIdx) => {
@@ -416,6 +454,7 @@ export async function mount(container) {
 
       oiLogsContent.innerHTML = '';
       oiLogsContent.appendChild(miniSummary);
+      oiLogsContent.appendChild(miniSummary2);
       oiLogsContent.appendChild(el('div', { class: 'data-grid-wrap' }, t));
     } catch (e) {
       if (!silent) oiLogsContent.innerHTML = `<div class="empty-state"><span class="bear">Failed</span><span class="text-xs mono dim">${e.message}</span></div>`;
