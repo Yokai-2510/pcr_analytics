@@ -68,6 +68,7 @@ export const api = {
   updateChart: (id, body) => fetchJson(`/api/charts/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
   deleteChart: (id) => fetchJson(`/api/charts/${id}`, { method: 'DELETE' }),
 
+  computedTicks: (ins, date) => fetchJson(`/api/computed-ticks/${ins}${date ? `?date=${date}` : ''}`),
   dataColumns: () => fetchJson('/api/data/columns'),
   dataDistinct: (col, qs = '') => fetchJson(`/api/data/distinct/${col}${qs}`),
   dataQuery: (body) => fetchJson('/api/data/query', { method: 'POST', body: JSON.stringify(body) }),
