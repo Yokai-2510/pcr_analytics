@@ -452,7 +452,7 @@ export async function mount(container) {
       const latest = rows[0];
       const buyCount = rows.filter(r => (r.signal || '').toUpperCase() === 'BUY').length;
       const sellCount = rows.filter(r => (r.signal || '').toUpperCase() === 'SELL').length;
-      const crossoverCount = rows.filter(r => r.crossover === true || r.crossover === 'TRUE' || r.crossover === 'true').length;
+      const crossoverCount = rows.filter(r => r.crossover === true || r.crossover === 1 || r.crossover === 'TRUE' || r.crossover === 'true').length;
 
       const summaryStrip = el('div', { class: 'card', style: { display: 'flex', gap: '28px', alignItems: 'center', flexWrap: 'wrap', padding: '14px 20px', marginBottom: '16px' } },
         el('div', {},
@@ -509,7 +509,7 @@ export async function mount(container) {
         const sigLabel = signal === 'BUY' ? 'BUY' : signal === 'SELL' ? 'SELL' : signal || '—';
         tr.appendChild(el('td', {}, el('span', { class: `change-pill ${sigTone}`, style: { fontSize: '10px' } }, sigLabel)));
         // Crossover
-        const crossover = r.crossover === true || r.crossover === 'TRUE' || r.crossover === 'true';
+        const crossover = r.crossover === true || r.crossover === 1 || r.crossover === 'TRUE' || r.crossover === 'true';
         tr.appendChild(el('td', { class: 'mono', style: { fontWeight: crossover ? '700' : '400', color: crossover ? 'var(--accent)' : 'var(--text-muted)' } }, crossover ? 'TRUE' : 'FALSE'));
         tbody.appendChild(tr);
       });
