@@ -142,7 +142,7 @@ export async function mount(container) {
     acts.appendChild(el('button', { class: 'icon-btn', title: 'Edit', onclick: () => openEditor(chart) }, icon('edit')));
     acts.appendChild(el('button', { class: 'icon-btn', title: 'Delete', onclick: async () => {
       if (!confirm('Delete chart?')) return;
-      try { await api.deleteChart(chart.id); savedCharts = savedCharts.filter(c => c.id !== chart.id); buildToolbar(); render(); toast('Deleted', 'success'); } catch (e) {}
+      try { await api.deleteChart(chart.id); store.savedCharts = store.savedCharts.filter(c => c.id !== chart.id); buildToolbar(); render(); toast('Deleted', 'success'); } catch (e) {}
     } }, icon('trash')));
     head.appendChild(acts);
     tile.appendChild(head);
