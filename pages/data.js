@@ -482,6 +482,27 @@ export async function mount(container) {
         entrySignalsContent.innerHTML = '<div class="empty-state">No computed ticks for this date.</div>';
         return;
       }
+      // ── Fill null ce/pe_oi_change from cumulative diffs ──
+      // The backend may return null for the first few ticks' change values
+      // even though cumulative values are populated. Compute from diffs.
+      for (let i = 0; i < ticks.length; i++) {
+        const t = ticks[i];
+        if (t.ce_oi_change == null || t.pe_oi_change == null) {
+          const ceCumm = t.ce_oi_cumm_change ?? t.ce_cumulative ?? t.ce_oi_cumm ?? 0;
+          const peCumm = t.pe_oi_cumm_change ?? t.pe_cumulative ?? t.pe_oi_cumm ?? 0;
+          if (i === 0) {
+            if (t.ce_oi_change == null) t.ce_oi_change = ceCumm;
+            if (t.pe_oi_change == null) t.pe_oi_change = peCumm;
+          } else {
+            const prev = ticks[i - 1];
+            const prevCeCumm = prev.ce_oi_cumm_change ?? prev.ce_cumulative ?? prev.ce_oi_cumm ?? 0;
+            const prevPeCumm = prev.pe_oi_cumm_change ?? prev.pe_cumulative ?? prev.pe_oi_cumm ?? 0;
+            if (t.ce_oi_change == null) t.ce_oi_change = ceCumm - prevCeCumm;
+            if (t.pe_oi_change == null) t.pe_oi_change = peCumm - prevPeCumm;
+          }
+        }
+      }
+
       // Reverse chronological (latest at top)
       const rows = [...ticks].reverse();
 
