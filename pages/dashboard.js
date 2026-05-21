@@ -7,6 +7,7 @@ let pollTimer, statusTimer;
 let featuredChart;
 let sparkCharts = {};
 let currentInstrument = 'nifty';
+let _latestOiChange = {};  // { instrument: { ce, pe } }
 
 // refs — populated once during build, never rebuilt
 let _built = false;
@@ -91,11 +92,9 @@ function buildInstrumentCards(page, data) {
     ));
 
     const ceOi = el('div', { class: 'mono', style: { fontSize: '13px', fontWeight: 500 } }, fmtCompact(it.total_ce_oi));
-    const ceChange = el('div', { class: `mono ${it.ce_oi_change >= 0 ? 'bull' : 'bear'}`, style: { fontSize: '10px' } },
-      fmtSigned(it.ce_oi_change, 0) === '—' ? '—' : (it.ce_oi_change >= 0 ? '+' : '') + fmtCompact(it.ce_oi_change));
+    const ceChange = el('div', { class: 'mono', style: { fontSize: '10px' } }, '—');
     const peOi = el('div', { class: 'mono', style: { fontSize: '13px', fontWeight: 500 } }, fmtCompact(it.total_pe_oi));
-    const peChange = el('div', { class: `mono ${it.pe_oi_change >= 0 ? 'bull' : 'bear'}`, style: { fontSize: '10px' } },
-      fmtSigned(it.pe_oi_change, 0) === '—' ? '—' : (it.pe_oi_change >= 0 ? '+' : '') + fmtCompact(it.pe_oi_change));
+    const peChange = el('div', { class: 'mono', style: { fontSize: '10px' } }, '—');
 
     card.appendChild(el('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' } },
       el('div', {}, el('div', { style: { fontSize: '10px', color: 'var(--text-muted)' } }, 'Call OI'), ceOi, ceChange),
@@ -263,11 +262,15 @@ function updateInstrumentCards(data) {
     refs.pcrLabel.className = `mono ${pcrTone}`; refs.pcrLabel.textContent = fmtNum(it.pcr, 3);
     refs.pcrBar.style.width = pcrPct + '%'; refs.pcrBar.style.background = pcrTone === 'bull' ? 'var(--bull)' : 'var(--bear)';
     refs.ceOi.textContent = fmtCompact(it.total_ce_oi);
-    refs.ceChange.className = `mono ${it.ce_oi_change >= 0 ? 'bull' : 'bear'}`;
-    refs.ceChange.textContent = fmtSigned(it.ce_oi_change, 0) === '—' ? '—' : (it.ce_oi_change >= 0 ? '+' : '') + fmtCompact(it.ce_oi_change);
     refs.peOi.textContent = fmtCompact(it.total_pe_oi);
-    refs.peChange.className = `mono ${it.pe_oi_change >= 0 ? 'bull' : 'bear'}`;
-    refs.peChange.textContent = fmtSigned(it.pe_oi_change, 0) === '—' ? '—' : (it.pe_oi_change >= 0 ? '+' : '') + fmtCompact(it.pe_oi_change);
+    // Latest tick-to-tick OI change (populated by fetchLatestOiChanges)
+    const latest = _latestOiChange[it.instrument];
+    if (latest) {
+      refs.ceChange.className = `mono ${latest.ce >= 0 ? 'bull' : 'bear'}`;
+      refs.ceChange.textContent = (latest.ce >= 0 ? '+' : '') + fmtCompact(latest.ce);
+      refs.peChange.className = `mono ${latest.pe >= 0 ? 'bull' : 'bear'}`;
+      refs.peChange.textContent = (latest.pe >= 0 ? '+' : '') + fmtCompact(latest.pe);
+    }
 
     // ΔPCR = use API-provided value
     const pcrChange = it.delta_pcr ?? null;
@@ -384,6 +387,30 @@ function hideError() {
 }
 
 // ──────────────────────────────────────────────────────────────────────────
+// Latest tick-to-tick OI change helper
+// ──────────────────────────────────────────────────────────────────────────
+
+async function fetchLatestOiChanges(instruments) {
+  const today = new Date().toISOString().slice(0, 10);
+  await Promise.all(instruments.map(async (it) => {
+    try {
+      const rows = await api.totalOi(it.instrument, today);
+      const arr = Array.isArray(rows) ? rows : (rows.data || rows.rows || []);
+      if (arr.length >= 2) {
+        const last = arr[arr.length - 1];
+        const prev = arr[arr.length - 2];
+        _latestOiChange[it.instrument] = {
+          ce: (last.total_ce_oi || 0) - (prev.total_ce_oi || 0),
+          pe: (last.total_pe_oi || 0) - (prev.total_pe_oi || 0),
+        };
+      } else if (arr.length === 1) {
+        _latestOiChange[it.instrument] = { ce: 0, pe: 0 };
+      }
+    } catch (e) { /* silently skip */ }
+  }));
+}
+
+// ──────────────────────────────────────────────────────────────────────────
 // Mount + Refresh
 // ──────────────────────────────────────────────────────────────────────────
 
@@ -418,7 +445,8 @@ export async function mount(container) {
     buildBottom(page, data);
     _built = true;
 
-    // Initial spark chart creation
+    // Fetch latest tick-to-tick OI changes, then update cards
+    await fetchLatestOiChanges(data.instruments);
     updateInstrumentCards(data);
     updateBottom(data);
   } catch (e) {
@@ -457,6 +485,7 @@ async function refresh() {
 
     // Data-only updates — DOM structure is never touched
     updateHero(data);
+    await fetchLatestOiChanges(data.instruments);
     updateInstrumentCards(data);
     updateUtil(data);
     updateFeatured();
