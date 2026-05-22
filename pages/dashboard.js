@@ -272,8 +272,8 @@ function updateInstrumentCards(data) {
       refs.peChange.textContent = (latest.pe >= 0 ? '+' : '') + fmtCompact(latest.pe);
     }
 
-    // ΔPCR = use API-provided value
-    const pcrChange = it.delta_pcr ?? null;
+    // ΔPCR = ratio of the latest tick-to-tick OI changes (ΔPE / ΔCE)
+    const pcrChange = latest?.delta_pcr ?? null;
     const pcrChangeTone = pcrChange != null ? (pcrChange >= 0 ? 'bull' : 'bear') : '';
     refs.deltaPcrVal.className = `mono ${pcrChangeTone}`;
     refs.deltaPcrVal.textContent = pcrChange != null ? fmtNum(pcrChange, 3) : '—';
@@ -390,22 +390,32 @@ function hideError() {
 // Latest tick-to-tick OI change helper
 // ──────────────────────────────────────────────────────────────────────────
 
+async function _loadOiSeries(instrument, date) {
+  const rows = await api.totalOi(instrument, date);
+  return Array.isArray(rows) ? rows : (rows.data || rows.rows || []);
+}
+
 async function fetchLatestOiChanges(instruments) {
   const today = new Date().toISOString().slice(0, 10);
   await Promise.all(instruments.map(async (it) => {
     try {
-      const rows = await api.totalOi(it.instrument, today);
-      const arr = Array.isArray(rows) ? rows : (rows.data || rows.rows || []);
-      if (arr.length >= 2) {
-        const last = arr[arr.length - 1];
-        const prev = arr[arr.length - 2];
-        _latestOiChange[it.instrument] = {
-          ce: (last.total_ce_oi || 0) - (prev.total_ce_oi || 0),
-          pe: (last.total_pe_oi || 0) - (prev.total_pe_oi || 0),
-        };
-      } else if (arr.length === 1) {
-        _latestOiChange[it.instrument] = { ce: 0, pe: 0 };
+      let arr = await _loadOiSeries(it.instrument, today);
+      // Before market open today has only the prev_close baseline (1 row).
+      // Fall back to the most recent date that has at least two ticks so we
+      // still show the latest tick-to-tick change instead of a stale +0.
+      if (arr.length < 2) {
+        const hist = await api.history(it.instrument).catch(() => []);
+        const fallback = (Array.isArray(hist) ? hist : []).find(h => (h.ticks ?? 0) >= 2);
+        if (fallback) arr = await _loadOiSeries(it.instrument, fallback.date);
       }
+      if (arr.length < 2) return;
+      const last = arr[arr.length - 1];
+      const prev = arr[arr.length - 2];
+      const ce = (last.total_ce_oi || 0) - (prev.total_ce_oi || 0);
+      const pe = (last.total_pe_oi || 0) - (prev.total_pe_oi || 0);
+      // ΔPCR derived from the same tick pair: ΔPE_OI / ΔCE_OI
+      const delta_pcr = ce !== 0 ? pe / ce : null;
+      _latestOiChange[it.instrument] = { ce, pe, delta_pcr };
     } catch (e) { /* silently skip */ }
   }));
 }
