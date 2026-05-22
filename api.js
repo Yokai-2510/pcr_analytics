@@ -50,7 +50,7 @@ export async function fetchJson(path, opts = {}) {
 export const api = {
   status: () => fetchJson('/api/status'),
   exchangeStatus: (ex) => fetchJson(`/api/exchange-status/${ex}`),
-  dashboard: (sparkPoints = 60) => fetchJson(`/api/dashboard/summary?spark_points=${sparkPoints}`),
+  dashboard: (sparkPoints = 60, date) => fetchJson(`/api/dashboard/summary?spark_points=${sparkPoints}${date ? `&date=${date}` : ''}`),
   snapshots: (ins, params = '') => fetchJson(`/api/snapshots/${ins}${params}`),
   pcr: (ins) => fetchJson(`/api/pcr/${ins}`),
   totalOi: (ins, date) => fetchJson(`/api/total-oi/${ins}${date ? `?date=${date}` : ''}`),

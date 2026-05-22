@@ -778,7 +778,7 @@ export async function mount(container) {
     if (!instrument || !date) return null;
     const [oiData, dashData] = await Promise.all([
       api.totalOi(instrument, date),
-      api.dashboard(60),
+      api.dashboard(60, date),
     ]);
     const rows = Array.isArray(oiData) ? oiData : (oiData.data || oiData.rows || []);
     if (!rows.length) return null;
