@@ -217,27 +217,42 @@ async function renderCredentials(root) {
     statusPill.className = 'change-pill neutral';
     statusPill.textContent = '… testing';
     profileBox.style.display = '';
-    profileBox.textContent = 'Calling /v2/user/profile …';
+    profileBox.textContent = 'Probing Upstox …';
     try {
       const res = await api.testUpstox();
-      if (res.connected) {
-        const p = res.profile || {};
-        statusPill.className = 'change-pill bull';
-        statusPill.textContent = `✓ ${p.user_name || p.user_id || 'connected'}`;
-        profileBox.innerHTML = '';
-        const kvs = [
-          ['user_name', p.user_name], ['user_id', p.user_id], ['email', p.email],
-          ['broker', p.broker], ['user_type', p.user_type], ['is_active', String(p.is_active ?? '')],
-          ['exchanges', (p.exchanges || []).join(', ')], ['products', (p.products || []).join(', ')],
-          ['order_types', (p.order_types || []).join(', ')],
-        ].filter(([, v]) => v !== undefined && v !== '');
-        const dl = el('div', { style: { display: 'grid', gridTemplateColumns: '140px 1fr', gap: '4px 12px' } });
-        kvs.forEach(([k, v]) => { dl.appendChild(el('div', { class: 'label' }, k)); dl.appendChild(el('div', { class: 'mono' }, String(v))); });
-        profileBox.appendChild(dl);
-      } else {
+      if (!res.connected) {
         statusPill.className = 'change-pill bear';
-        statusPill.textContent = `✗ ${res.status_code ? 'HTTP ' + res.status_code : 'failed'}`;
-        profileBox.textContent = res.error || 'unknown error';
+        statusPill.textContent = '✗ disconnected';
+        const errs = res.errors || {};
+        profileBox.textContent = errs.market || errs.profile || res.error || 'unknown error';
+      } else {
+        statusPill.className = 'change-pill bull';
+        const p = res.profile || null;
+        statusPill.textContent = p
+          ? `✓ ${p.user_name || p.user_id || 'connected'}`
+          : `✓ connected (${res.token_kind || 'token'})`;
+        profileBox.innerHTML = '';
+        const dl = el('div', { style: { display: 'grid', gridTemplateColumns: '160px 1fr', gap: '4px 12px' } });
+        const addRow = (k, v) => { if (v === undefined || v === '' || v === null) return; dl.appendChild(el('div', { class: 'label' }, k)); dl.appendChild(el('div', { class: 'mono' }, String(v))); };
+        addRow('token_in_use', res.token_kind);
+        if (p) {
+          addRow('user_name', p.user_name);
+          addRow('user_id', p.user_id);
+          addRow('email', p.email);
+          addRow('broker', p.broker);
+          addRow('user_type', p.user_type);
+          addRow('is_active', p.is_active === undefined ? '' : String(p.is_active));
+          addRow('exchanges', (p.exchanges || []).join(', '));
+          addRow('products', (p.products || []).join(', '));
+          addRow('order_types', (p.order_types || []).join(', '));
+        }
+        if (res.market) {
+          addRow('market_status', `${res.market.exchange} · ${res.market.status}`);
+        }
+        if (!p && res.errors?.profile) {
+          addRow('note', '/user/profile blocked (needs access_token) — market endpoints OK');
+        }
+        profileBox.appendChild(dl);
       }
     } catch (e) {
       statusPill.className = 'change-pill bear';
