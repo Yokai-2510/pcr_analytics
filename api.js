@@ -83,6 +83,7 @@ export const api = {
   credentials: () => fetchJson('/api/credentials'),
   credentialsReveal: () => fetchJson('/api/credentials/reveal'),
   testUpstox: () => fetchJson('/api/upstox/test', { method: 'POST', silent: true }),
+  refreshUpstoxToken: () => fetchJson('/api/upstox/refresh-token', { method: 'POST', silent: true, timeoutMs: 120000 }),
   patchUpstox: (body) => fetchJson('/api/credentials/upstox', { method: 'PATCH', body: JSON.stringify(body) }),
   patchAdmin: (body) => fetchJson('/api/credentials/admin', { method: 'PATCH', body: JSON.stringify(body) }),
   rotateAdmin: () => fetchJson('/api/credentials/admin/rotate', { method: 'POST' }),

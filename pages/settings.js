@@ -158,12 +158,13 @@ async function renderCredentials(root) {
   const upstox = creds.upstox || {};
   const upCard = el('div', { class: 'card settings-section' });
 
-  // Header — title + connection status pill + Test button
+  // Header — title + connection status pill + Test / Fetch buttons
   const statusPill = el('span', { class: 'change-pill neutral', style: { fontSize: '11px' } }, '— not tested');
+  const fetchBtn = el('button', { class: 'btn primary sm', title: 'Run Playwright login to refresh access_token' }, 'Fetch Access Token');
   const testBtn = el('button', { class: 'btn ghost sm' }, 'Test Upstox');
   upCard.appendChild(el('div', { class: 'row', style: { justifyContent: 'space-between', alignItems: 'center', gap: '12px', marginBottom: '10px' } },
     el('div', { class: 'row gap-8', style: { alignItems: 'center' } }, el('h3', { style: { margin: 0 } }, 'Upstox credentials'), statusPill),
-    testBtn,
+    el('div', { class: 'row gap-8' }, fetchBtn, testBtn),
   ));
 
   // Profile/error details panel (hidden until tested)
@@ -211,6 +212,39 @@ async function renderCredentials(root) {
       try { await api.patchUpstox(body); toast('Upstox saved', 'success'); renderCredentials(root); } catch (e) {}
     } }, 'Save Upstox')
   ));
+
+  fetchBtn.onclick = async () => {
+    fetchBtn.disabled = true;
+    testBtn.disabled = true;
+    statusPill.className = 'change-pill neutral';
+    statusPill.textContent = '… logging in via Playwright';
+    profileBox.style.display = '';
+    profileBox.textContent = 'Driving Upstox login (mobile → OTP → PIN). This usually takes 10-30 seconds…';
+    try {
+      const res = await api.refreshUpstoxToken();
+      if (res.success) {
+        statusPill.className = 'change-pill bull';
+        statusPill.textContent = res.refreshed === false ? '✓ token still valid' : '✓ token refreshed';
+        profileBox.textContent = res.refreshed === false
+          ? `Existing token still accepted by Upstox (preview: ${res.token_preview || '—'}). Running Test will show the profile.`
+          : `New access_token saved (preview: ${res.token_preview || '—'}). Click Test Upstox to see the profile.`;
+        toast('Access token saved', 'success');
+        renderCredentials(root);
+      } else {
+        statusPill.className = 'change-pill bear';
+        statusPill.textContent = '✗ login failed';
+        profileBox.textContent = res.error || 'unknown error';
+        toast('Token refresh failed', 'error');
+      }
+    } catch (e) {
+      statusPill.className = 'change-pill bear';
+      statusPill.textContent = '✗ request failed';
+      profileBox.textContent = e.message || String(e);
+    } finally {
+      fetchBtn.disabled = false;
+      testBtn.disabled = false;
+    }
+  };
 
   testBtn.onclick = async () => {
     testBtn.disabled = true;
