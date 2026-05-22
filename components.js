@@ -127,6 +127,55 @@ export function passwordInput(name, placeholder = '') {
   return { wrap, input };
 }
 
+// ---- credential input ----
+// Like passwordInput but the eye fetches the stored plaintext from the
+// backend on demand and drops it into the input. Click again to hide and
+// clear. Returns { wrap, input, isEdited() } so the caller can skip fields
+// that were merely revealed and not modified.
+export function credentialInput(name, placeholder, fetchFullValue) {
+  const input = el('input', { type: 'password', name, placeholder, autocomplete: 'off' });
+  const btn = el('button', { type: 'button', class: 'eye', title: 'Show stored value' });
+  btn.appendChild(icon('eye'));
+
+  let revealedValue = null;
+  let busy = false;
+
+  btn.addEventListener('click', async () => {
+    if (busy) return;
+    if (revealedValue !== null) {
+      input.type = 'password';
+      input.value = '';
+      revealedValue = null;
+      btn.innerHTML = '';
+      btn.appendChild(icon('eye'));
+      return;
+    }
+    busy = true;
+    btn.disabled = true;
+    try {
+      const full = await fetchFullValue();
+      if (!full) { toast(`${name}: not configured`, 'warn'); return; }
+      input.type = 'text';
+      input.value = full;
+      revealedValue = full;
+      btn.innerHTML = '';
+      btn.appendChild(icon('eyeOff'));
+    } catch (e) {
+      toast(`Failed to reveal ${name}: ${e.message}`, 'error');
+    } finally {
+      busy = false;
+      btn.disabled = false;
+    }
+  });
+
+  const wrap = el('div', { class: 'password-wrap' }, input, btn);
+  return {
+    wrap,
+    input,
+    isEdited: () => input.value !== '' && input.value !== revealedValue,
+  };
+}
+
 // ---- custom Select (replaces native <select>) ----
 // options: [{ value, label, description? }]
 // Returns { el, getValue, setValue, setOptions }

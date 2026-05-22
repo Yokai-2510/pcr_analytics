@@ -81,6 +81,8 @@ export const api = {
   patchInstrument: (ins, body) => fetchJson(`/api/config/${ins}`, { method: 'PATCH', body: JSON.stringify(body) }),
 
   credentials: () => fetchJson('/api/credentials'),
+  credentialsReveal: () => fetchJson('/api/credentials/reveal'),
+  testUpstox: () => fetchJson('/api/upstox/test', { method: 'POST', silent: true }),
   patchUpstox: (body) => fetchJson('/api/credentials/upstox', { method: 'PATCH', body: JSON.stringify(body) }),
   patchAdmin: (body) => fetchJson('/api/credentials/admin', { method: 'PATCH', body: JSON.stringify(body) }),
   rotateAdmin: () => fetchJson('/api/credentials/admin/rotate', { method: 'POST' }),

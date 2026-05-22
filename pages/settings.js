@@ -1,5 +1,5 @@
 // pages/settings.js — sub-tabs at top, connection embedded in Credentials
-import { el, toast, passwordInput, icon, WeekdayPicker, parseWeekdays, serializeWeekdays } from '../components.js';
+import { el, toast, passwordInput, credentialInput, icon, WeekdayPicker, parseWeekdays, serializeWeekdays } from '../components.js';
 import { api } from '../api.js';
 import { store } from '../store.js';
 
@@ -157,61 +157,97 @@ async function renderCredentials(root) {
 
   const upstox = creds.upstox || {};
   const upCard = el('div', { class: 'card settings-section' });
-  upCard.appendChild(el('h3', {}, 'Upstox credentials'));
+
+  // Header — title + connection status pill + Test button
+  const statusPill = el('span', { class: 'change-pill neutral', style: { fontSize: '11px' } }, '— not tested');
+  const testBtn = el('button', { class: 'btn ghost sm' }, 'Test Upstox');
+  upCard.appendChild(el('div', { class: 'row', style: { justifyContent: 'space-between', alignItems: 'center', gap: '12px', marginBottom: '10px' } },
+    el('div', { class: 'row gap-8', style: { alignItems: 'center' } }, el('h3', { style: { margin: 0 } }, 'Upstox credentials'), statusPill),
+    testBtn,
+  ));
+
+  // Profile/error details panel (hidden until tested)
+  const profileBox = el('div', { class: 'mono text-xs muted', style: { display: 'none', marginBottom: '14px', padding: '10px 12px', background: 'var(--surface-1)', border: '1px solid var(--border)', borderRadius: 'var(--r-md)' } });
+  upCard.appendChild(profileBox);
 
   const groups = [
-    { title: 'App keys', fields: [
-      { name: 'api_key', secret: false },
-      { name: 'api_secret', secret: true },
-      { name: 'redirect_uri', secret: false },
-    ]},
-    { title: 'Auth tokens', fields: [
-      { name: 'access_token', secret: true },
-      { name: 'analytics_token', secret: true },
-      { name: 'token', secret: true },
-      { name: 'auth_code', secret: false },
-      { name: 'code', secret: false },
-    ]},
-    { title: 'User + device', fields: [
-      { name: 'mobile_no', secret: false },
-      { name: 'pin', secret: true },
-      { name: 'totp_key', secret: true },
-    ]},
-    { title: 'Network', fields: [
-      { name: 'staticip1', secret: false },
-      { name: 'staticip2', secret: false },
-    ]},
+    { title: 'App keys', fields: ['api_key', 'api_secret', 'redirect_uri'] },
+    { title: 'Auth tokens', fields: ['access_token', 'analytics_token', 'token', 'auth_code', 'code'] },
+    { title: 'User + device', fields: ['mobile_no', 'pin', 'totp_key'] },
+    { title: 'Network', fields: ['staticip1', 'staticip2'] },
   ];
-  const allInputs = {};
+
+  // Lazy reveal — fetch all upstox plaintext once on first eye click, then cache
+  let revealCache = null;
+  async function fetchUpstoxFull(name) {
+    if (!revealCache) {
+      const data = await api.credentialsReveal();
+      revealCache = data.upstox || {};
+    }
+    return revealCache[name] || '';
+  }
+
+  const handles = {};
   groups.forEach(g => {
-    const gTitle = el('h4', { class: 'cred-group-title' }, g.title);
+    upCard.appendChild(el('h4', { class: 'cred-group-title' }, g.title));
     const grid = el('div', { class: 'kv-grid' });
-    g.fields.forEach(f => {
-      grid.appendChild(el('span', { class: 'label' }, f.name));
-      const preview = upstox[f.name]?.preview || '';
-      const configured = upstox[f.name]?.configured;
+    g.fields.forEach(name => {
+      const preview = upstox[name]?.preview || '';
+      const configured = upstox[name]?.configured;
       const placeholder = configured ? `••• ${preview}` : 'not configured';
-      if (f.secret) {
-        const { wrap, input } = passwordInput(f.name, placeholder);
-        allInputs[f.name] = input;
-        grid.appendChild(wrap);
-      } else {
-        const input = el('input', { type: 'text', placeholder });
-        allInputs[f.name] = input;
-        grid.appendChild(input);
-      }
+      grid.appendChild(el('span', { class: 'label' }, name));
+      const h = credentialInput(name, placeholder, () => fetchUpstoxFull(name));
+      handles[name] = h;
+      grid.appendChild(h.wrap);
     });
-    upCard.appendChild(gTitle);
     upCard.appendChild(grid);
   });
+
   upCard.appendChild(el('div', { class: 'row mt-12', style: { justifyContent: 'flex-end' } },
     el('button', { class: 'btn primary sm', onclick: async () => {
       const body = {};
-      for (const [k, inp] of Object.entries(allInputs)) if (inp.value) body[k] = inp.value;
+      for (const [k, h] of Object.entries(handles)) if (h.isEdited()) body[k] = h.input.value;
       if (!Object.keys(body).length) { toast('Nothing to save', 'warn'); return; }
-      try { await api.patchUpstox(body); toast('Upstox saved', 'success'); for (const inp of Object.values(allInputs)) inp.value = ''; renderCredentials(root); } catch (e) {}
+      try { await api.patchUpstox(body); toast('Upstox saved', 'success'); renderCredentials(root); } catch (e) {}
     } }, 'Save Upstox')
   ));
+
+  testBtn.onclick = async () => {
+    testBtn.disabled = true;
+    statusPill.className = 'change-pill neutral';
+    statusPill.textContent = '… testing';
+    profileBox.style.display = '';
+    profileBox.textContent = 'Calling /v2/user/profile …';
+    try {
+      const res = await api.testUpstox();
+      if (res.connected) {
+        const p = res.profile || {};
+        statusPill.className = 'change-pill bull';
+        statusPill.textContent = `✓ ${p.user_name || p.user_id || 'connected'}`;
+        profileBox.innerHTML = '';
+        const kvs = [
+          ['user_name', p.user_name], ['user_id', p.user_id], ['email', p.email],
+          ['broker', p.broker], ['user_type', p.user_type], ['is_active', String(p.is_active ?? '')],
+          ['exchanges', (p.exchanges || []).join(', ')], ['products', (p.products || []).join(', ')],
+          ['order_types', (p.order_types || []).join(', ')],
+        ].filter(([, v]) => v !== undefined && v !== '');
+        const dl = el('div', { style: { display: 'grid', gridTemplateColumns: '140px 1fr', gap: '4px 12px' } });
+        kvs.forEach(([k, v]) => { dl.appendChild(el('div', { class: 'label' }, k)); dl.appendChild(el('div', { class: 'mono' }, String(v))); });
+        profileBox.appendChild(dl);
+      } else {
+        statusPill.className = 'change-pill bear';
+        statusPill.textContent = `✗ ${res.status_code ? 'HTTP ' + res.status_code : 'failed'}`;
+        profileBox.textContent = res.error || 'unknown error';
+      }
+    } catch (e) {
+      statusPill.className = 'change-pill bear';
+      statusPill.textContent = '✗ request failed';
+      profileBox.textContent = e.message || String(e);
+    } finally {
+      testBtn.disabled = false;
+    }
+  };
+
   root.appendChild(upCard);
 
   const admin = creds.admin?.api_key || {};
