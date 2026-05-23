@@ -10,8 +10,6 @@ const DEFAULT_CONFIG = {
   mode: 'paper',                          // 'paper' | 'live'
   auto_execute: false,
   cooldown_minutes: 0,
-  ce_trigger_sentiment: 'both',           // 'bull' | 'strong_bull' | 'both'
-  pe_trigger_sentiment: 'both',           // 'bear' | 'strong_bear' | 'both'
 
   // Instrument & quantity — multi-select underlyings
   instruments: ['nifty'],                 // any subset of ['nifty','banknifty','sensex']
@@ -129,25 +127,29 @@ function renderEntrySection(cfg) {
     onChange: (on) => { cfg.auto_execute = on; },
   });
 
-  const ceSel = Select({
-    options: [
-      { value: 'both', label: 'Bull + Strong Bull' },
-      { value: 'bull', label: 'Bull only' },
-      { value: 'strong_bull', label: 'Strong Bull only' },
-    ],
-    value: cfg.ce_trigger_sentiment,
-    onChange: (v) => { cfg.ce_trigger_sentiment = v; },
-  });
-
-  const peSel = Select({
-    options: [
-      { value: 'both', label: 'Bear + Strong Bear' },
-      { value: 'bear', label: 'Bear only' },
-      { value: 'strong_bear', label: 'Strong Bear only' },
-    ],
-    value: cfg.pe_trigger_sentiment,
-    onChange: (v) => { cfg.pe_trigger_sentiment = v; },
-  });
+  // Entry direction is derived, not configured. At a crossover, whichever
+  // side's cumulative OI change was lower just before the crossover is the
+  // side that gets bought. Show the rule rather than offer toggles.
+  const directionRules = el('div', {
+    style: {
+      display: 'grid',
+      gridTemplateColumns: '1fr auto 1fr',
+      gap: '6px 12px',
+      padding: '12px 14px',
+      background: 'var(--surface-1)',
+      border: '1px solid var(--border)',
+      borderRadius: 'var(--r-md)',
+      fontSize: '12px',
+      alignItems: 'center',
+    },
+  },
+    el('span', { class: 'mono', style: { textAlign: 'right' } }, 'CE cumm < PE cumm  before crossover'),
+    el('span', { class: 'mono', style: { color: 'var(--text-muted)' } }, '→'),
+    el('span', { class: 'mono bull', style: { fontWeight: 600 } }, 'BUY CE'),
+    el('span', { class: 'mono', style: { textAlign: 'right' } }, 'PE cumm < CE cumm  before crossover'),
+    el('span', { class: 'mono', style: { color: 'var(--text-muted)' } }, '→'),
+    el('span', { class: 'mono bear', style: { fontWeight: 600 } }, 'BUY PE'),
+  );
 
   const cooldownInput = el('input', { type: 'number', min: '0', max: '120', value: String(cfg.cooldown_minutes) });
   cooldownInput.onchange = () => { cfg.cooldown_minutes = parseInt(cooldownInput.value, 10) || 0; };
@@ -164,14 +166,9 @@ function renderEntrySection(cfg) {
       hint: 'When off, signals appear in the Data tab but no orders fire.',
     }),
     FormField({
-      label: 'CE entry trigger',
-      input: ceSel.el,
-      hint: 'Which bullish sentiment levels (from Data → OI Logs) trigger a CE entry.',
-    }),
-    FormField({
-      label: 'PE entry trigger',
-      input: peSel.el,
-      hint: 'Which bearish sentiment levels (from Data → OI Logs) trigger a PE entry.',
+      label: 'Entry direction (auto)',
+      input: directionRules,
+      hint: 'Whichever side’s cumulative OI change was lower just before the crossover is the side that gets bought. No configuration — the rule is fixed.',
     }),
     FormField({
       label: 'Cooldown (minutes)',
