@@ -1,26 +1,26 @@
 // pages/trade.js — paper/live trading config + open/closed orders
 // Backend execution wiring is pending; for now all config is persisted to
 // localStorage and Orders subtab shows empty-state tables.
-import { el, toast, Select } from '../components.js';
+import { el, toast, Select, Toggle, ChipMultiPicker, FormField } from '../components.js';
 
 const STORAGE_KEY = 'trade_config_v1';
 
 const DEFAULT_CONFIG = {
   // Entry conditions
-  mode: 'paper',                  // 'paper' | 'live'
+  mode: 'paper',                          // 'paper' | 'live'
   auto_execute: false,
-  entry_on_signal: 'both',        // 'both' | 'buy' | 'sell'
   cooldown_minutes: 0,
-  strategy: 'oi_crossover',       // 'oi_crossover'
+  ce_trigger_sentiment: 'both',           // 'bull' | 'strong_bull' | 'both'
+  pe_trigger_sentiment: 'both',           // 'bear' | 'strong_bear' | 'both'
 
-  // Instrument & quantity
-  instrument: 'nifty',
-  strike_mode: 'atm',             // 'atm' | 'atm_plus_1' | 'atm_minus_1' | 'custom'
+  // Instrument & quantity — multi-select underlyings
+  instruments: ['nifty'],                 // any subset of ['nifty','banknifty','sensex']
+  strike_mode: 'atm',                     // 'atm' | 'atm_plus_1' | 'atm_minus_1' | 'custom'
   custom_strike: null,
-  option_type: 'auto',            // 'auto' (BUY→CE, SELL→PE) | 'ce' | 'pe'
   lots: 1,
 
   // Exit conditions
+  exit_on_counter_crossover: true,        // first-class exit rule
   stop_loss_enabled: true,
   stop_loss_pct: 30,
   trailing_sl_enabled: false,
@@ -34,7 +34,7 @@ const DEFAULT_CONFIG = {
 };
 
 const LOT_SIZES = { nifty: 75, banknifty: 30, sensex: 20 };
-const INSTRUMENT_LABELS = { nifty: 'NIFTY', banknifty: 'BankNIFTY', sensex: 'Sensex' };
+const INSTRUMENT_LABEL = { nifty: 'NIFTY', banknifty: 'BankNIFTY', sensex: 'Sensex' };
 
 let subTab = 'configs';
 let orderTab = 'open';
@@ -83,7 +83,7 @@ export async function mount(container) {
 export function unmount() {}
 
 // ──────────────────────────────────────────────────────────────────────
-// Configs subtab — Entry / Instrument / Exit sections
+// Configs subtab — Entry / Instrument / Exit sections (vertical, scrollable)
 // ──────────────────────────────────────────────────────────────────────
 
 function renderConfigs(root) {
@@ -95,95 +95,107 @@ function renderConfigs(root) {
   root.appendChild(renderSaveBar(cfg, root));
 }
 
+function section(title, fields) {
+  const card = el('div', { class: 'card form-section' });
+  card.appendChild(el('h3', {}, title));
+  const body = el('div', { class: 'form-section-body' });
+  fields.forEach(f => f && body.appendChild(f));
+  card.appendChild(body);
+  return card;
+}
+
 function renderEntrySection(cfg) {
-  const card = el('div', { class: 'card settings-section' });
-  card.appendChild(el('h3', {}, 'Entry Conditions'));
+  // Paper / Live toggle — danger-styled when on (LIVE)
+  const modeToggle = Toggle({
+    value: cfg.mode === 'live',
+    danger: true,
+    onChange: (on) => {
+      if (on && !confirm('Switch to LIVE? Real broker orders will be placed.')) {
+        modeToggle.set(false);
+        return;
+      }
+      cfg.mode = on ? 'live' : 'paper';
+      modeLabel.textContent = on ? 'LIVE' : 'PAPER';
+      modeLabel.className = 'mono ' + (on ? 'bear' : 'bull');
+    },
+  });
+  const modeLabel = el('span', {
+    class: 'mono ' + (cfg.mode === 'live' ? 'bear' : 'bull'),
+    style: { fontSize: '12px', fontWeight: 600, marginRight: '8px' },
+  }, cfg.mode === 'live' ? 'LIVE' : 'PAPER');
 
-  // Mode toggle (paper/live) — prominent at top of section
-  const modePill = el('span', { class: '', style: { fontSize: '11px' } });
-  function paintMode() {
-    modePill.className = cfg.mode === 'live' ? 'change-pill bear' : 'change-pill bull';
-    modePill.textContent = cfg.mode === 'live' ? 'LIVE — real orders' : 'PAPER — simulated';
-  }
-  paintMode();
-  card.appendChild(el('div', {
-    class: 'row',
-    style: { justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px', padding: '10px 12px', background: 'var(--surface-1)', border: '1px solid var(--border)', borderRadius: 'var(--r-md)' },
-  },
-    el('div', {},
-      el('div', { style: { fontSize: '13px', fontWeight: 600 } }, 'Trading Mode'),
-      el('div', { class: 'text-xs muted', style: { marginTop: '2px' } }, 'Paper trades simulate fills locally. Live trades hit the broker.'),
-    ),
-    el('div', { class: 'row gap-8', style: { alignItems: 'center' } },
-      modePill,
-      el('button', { class: 'btn ghost sm', onclick: () => {
-        const next = cfg.mode === 'live' ? 'paper' : 'live';
-        if (next === 'live' && !confirm('Switch to LIVE? Real broker orders will be placed.')) return;
-        cfg.mode = next;
-        paintMode();
-      } }, 'Switch'),
-    ),
-  ));
-
-  const strategySelect = Select({
-    options: [{ value: 'oi_crossover', label: 'OI Crossover (cumulative)' }],
-    value: cfg.strategy,
-    onChange: (v) => { cfg.strategy = v; },
+  const autoExecToggle = Toggle({
+    value: cfg.auto_execute,
+    onChange: (on) => { cfg.auto_execute = on; },
   });
 
-  const entryOnSelect = Select({
+  const ceSel = Select({
     options: [
-      { value: 'both', label: 'Both BUY & SELL' },
-      { value: 'buy', label: 'Only BUY signals' },
-      { value: 'sell', label: 'Only SELL signals' },
+      { value: 'both', label: 'Bull + Strong Bull' },
+      { value: 'bull', label: 'Bull only' },
+      { value: 'strong_bull', label: 'Strong Bull only' },
     ],
-    value: cfg.entry_on_signal,
-    onChange: (v) => { cfg.entry_on_signal = v; },
+    value: cfg.ce_trigger_sentiment,
+    onChange: (v) => { cfg.ce_trigger_sentiment = v; },
   });
 
-  const autoExecCheck = el('input', { type: 'checkbox' });
-  autoExecCheck.checked = cfg.auto_execute;
-  autoExecCheck.onchange = () => { cfg.auto_execute = autoExecCheck.checked; };
+  const peSel = Select({
+    options: [
+      { value: 'both', label: 'Bear + Strong Bear' },
+      { value: 'bear', label: 'Bear only' },
+      { value: 'strong_bear', label: 'Strong Bear only' },
+    ],
+    value: cfg.pe_trigger_sentiment,
+    onChange: (v) => { cfg.pe_trigger_sentiment = v; },
+  });
 
   const cooldownInput = el('input', { type: 'number', min: '0', max: '120', value: String(cfg.cooldown_minutes) });
   cooldownInput.onchange = () => { cfg.cooldown_minutes = parseInt(cooldownInput.value, 10) || 0; };
 
-  card.appendChild(el('div', { class: 'kv-grid' },
-    el('span', { class: 'label' }, 'Strategy'), strategySelect.el,
-    el('span', { class: 'label' }, 'Auto-execute on signal'),
-    el('div', { class: 'row gap-8', style: { alignItems: 'center' } },
-      autoExecCheck,
-      el('span', { class: 'text-xs muted' }, 'when off, signals are visible but no orders fire'),
-    ),
-    el('span', { class: 'label' }, 'Entry on signal'), entryOnSelect.el,
-    el('span', { class: 'label' }, 'Cooldown (minutes)'),
-    el('div', { class: 'row gap-8', style: { alignItems: 'center' } },
-      cooldownInput,
-      el('span', { class: 'text-xs muted' }, 'minimum gap between entries'),
-    ),
-  ));
-
-  return card;
+  return section('Entry Conditions', [
+    FormField({
+      label: 'Trading Mode',
+      input: el('div', { class: 'row gap-8', style: { alignItems: 'center' } }, modeLabel, modeToggle.el),
+      hint: 'Paper trades simulate fills locally. Live trades hit the broker — real money, real orders.',
+    }),
+    FormField({
+      label: 'Auto-execute on signal',
+      input: autoExecToggle.el,
+      hint: 'When off, signals appear in the Data tab but no orders fire.',
+    }),
+    FormField({
+      label: 'CE entry trigger',
+      input: ceSel.el,
+      hint: 'Which bullish sentiment levels (from Data → OI Logs) trigger a CE entry.',
+    }),
+    FormField({
+      label: 'PE entry trigger',
+      input: peSel.el,
+      hint: 'Which bearish sentiment levels (from Data → OI Logs) trigger a PE entry.',
+    }),
+    FormField({
+      label: 'Cooldown (minutes)',
+      input: [cooldownInput, el('span', { class: 'unit' }, 'min')],
+      hint: 'Minimum gap between consecutive entries on the same underlying.',
+    }),
+  ]);
 }
 
 function renderInstrumentSection(cfg) {
-  const card = el('div', { class: 'card settings-section' });
-  card.appendChild(el('h3', {}, 'Instrument & Quantity'));
-
-  const instSelect = Select({
+  const instPicker = ChipMultiPicker({
     options: [
       { value: 'nifty', label: 'NIFTY' },
       { value: 'banknifty', label: 'BankNIFTY' },
       { value: 'sensex', label: 'Sensex' },
     ],
-    value: cfg.instrument,
+    value: cfg.instruments,
     onChange: (v) => {
-      cfg.instrument = v;
+      cfg.instruments = v;
       lotInfo.textContent = formatLotInfo(cfg);
     },
   });
 
-  const strikeSelect = Select({
+  const strikeSel = Select({
     options: [
       { value: 'atm', label: 'ATM (at-the-money)' },
       { value: 'atm_plus_1', label: 'ATM + 1 step (OTM)' },
@@ -193,7 +205,7 @@ function renderInstrumentSection(cfg) {
     value: cfg.strike_mode,
     onChange: (v) => {
       cfg.strike_mode = v;
-      customStrikeRow.style.display = v === 'custom' ? '' : 'none';
+      customField.style.display = v === 'custom' ? '' : 'none';
     },
   });
 
@@ -206,101 +218,142 @@ function renderInstrumentSection(cfg) {
     const v = parseFloat(customStrikeInput.value);
     cfg.custom_strike = Number.isFinite(v) ? v : null;
   };
-  const customStrikeRow = el('div', {
-    class: 'kv-grid',
-    style: { display: cfg.strike_mode === 'custom' ? '' : 'none', marginTop: '8px' },
-  },
-    el('span', { class: 'label' }, 'Custom strike'),
-    customStrikeInput,
-  );
-
-  const optionTypeSelect = Select({
-    options: [
-      { value: 'auto', label: 'Auto (BUY→CE, SELL→PE)' },
-      { value: 'ce', label: 'CE only (Call)' },
-      { value: 'pe', label: 'PE only (Put)' },
-    ],
-    value: cfg.option_type,
-    onChange: (v) => { cfg.option_type = v; },
+  const customField = FormField({
+    label: 'Custom strike',
+    input: customStrikeInput,
+    hint: 'Absolute strike price — only applied when one underlying is selected.',
   });
+  customField.style.display = cfg.strike_mode === 'custom' ? '' : 'none';
 
   const lotsInput = el('input', { type: 'number', min: '1', value: String(cfg.lots) });
-  const lotInfo = el('span', { class: 'text-xs muted' }, formatLotInfo(cfg));
   lotsInput.onchange = () => {
     cfg.lots = Math.max(1, parseInt(lotsInput.value, 10) || 1);
     lotsInput.value = String(cfg.lots);
     lotInfo.textContent = formatLotInfo(cfg);
   };
+  const lotInfo = el('div', { class: 'form-field-hint' }, formatLotInfo(cfg));
 
-  card.appendChild(el('div', { class: 'kv-grid' },
-    el('span', { class: 'label' }, 'Underlying'), instSelect.el,
-    el('span', { class: 'label' }, 'Strike selection'), strikeSelect.el,
-  ));
-  card.appendChild(customStrikeRow);
-  card.appendChild(el('div', { class: 'kv-grid', style: { marginTop: '8px' } },
-    el('span', { class: 'label' }, 'Option type'), optionTypeSelect.el,
-    el('span', { class: 'label' }, 'Lots'),
-    el('div', { class: 'row gap-8', style: { alignItems: 'center' } }, lotsInput, lotInfo),
-  ));
+  const lotField = FormField({
+    label: 'Lots per entry',
+    input: lotsInput,
+  });
+  lotField.appendChild(lotInfo);
 
-  return card;
+  return section('Instrument & Quantity', [
+    FormField({
+      label: 'Underlyings',
+      input: instPicker.el,
+      hint: 'Pick one or more. Each enabled underlying gets its own entries when its sentiment matches.',
+    }),
+    FormField({
+      label: 'Strike selection',
+      input: strikeSel.el,
+      hint: 'ATM resolves per-underlying using each instrument’s configured strike step.',
+    }),
+    customField,
+    lotField,
+  ]);
 }
 
 function formatLotInfo(cfg) {
-  const lot = LOT_SIZES[cfg.instrument] || 0;
-  return `${lot} units per lot · total ${cfg.lots * lot} units`;
+  if (!cfg.instruments?.length) return 'No underlying selected — pick at least one above.';
+  const parts = cfg.instruments.map((ins) => {
+    const lot = LOT_SIZES[ins] || 0;
+    return `${INSTRUMENT_LABEL[ins]}: ${cfg.lots} × ${lot} = ${cfg.lots * lot} units`;
+  });
+  return parts.join('   ·   ');
 }
 
 function renderExitSection(cfg) {
-  const card = el('div', { class: 'card settings-section' });
-  card.appendChild(el('h3', {}, 'Exit Conditions'));
+  // 1. Exit on counter-crossover — most important, lives at the top
+  const crossExitToggle = Toggle({
+    value: cfg.exit_on_counter_crossover,
+    onChange: (on) => { cfg.exit_on_counter_crossover = on; },
+  });
 
-  // Stop Loss
-  const slCheck = el('input', { type: 'checkbox' });
-  slCheck.checked = cfg.stop_loss_enabled;
+  // 2. Stop Loss
+  const slToggle = Toggle({
+    value: cfg.stop_loss_enabled,
+    onChange: (on) => {
+      cfg.stop_loss_enabled = on;
+      slInput.disabled = !on;
+      slField.classList.toggle('disabled', !on);
+    },
+  });
   const slInput = el('input', { type: 'number', min: '1', max: '100', step: '1', value: String(cfg.stop_loss_pct) });
   slInput.disabled = !cfg.stop_loss_enabled;
-  slCheck.onchange = () => {
-    cfg.stop_loss_enabled = slCheck.checked;
-    slInput.disabled = !slCheck.checked;
-  };
   slInput.onchange = () => { cfg.stop_loss_pct = parseFloat(slInput.value) || 0; };
+  const slField = FormField({
+    label: 'Stop Loss',
+    rightControl: slToggle.el,
+    input: [slInput, el('span', { class: 'unit' }, '% drop from entry premium')],
+    hint: 'Exits the position when the option premium falls by this %.',
+    disabled: !cfg.stop_loss_enabled,
+  });
 
-  // Trailing Stop Loss
-  const tslCheck = el('input', { type: 'checkbox' });
-  tslCheck.checked = cfg.trailing_sl_enabled;
+  // 3. Trailing SL — two inputs
+  const tslToggle = Toggle({
+    value: cfg.trailing_sl_enabled,
+    onChange: (on) => {
+      cfg.trailing_sl_enabled = on;
+      tslTrigger.disabled = !on;
+      tslStep.disabled = !on;
+      tslField.classList.toggle('disabled', !on);
+    },
+  });
   const tslTrigger = el('input', { type: 'number', min: '1', max: '500', step: '1', value: String(cfg.trailing_sl_trigger_pct) });
   const tslStep = el('input', { type: 'number', min: '1', max: '100', step: '1', value: String(cfg.trailing_sl_step_pct) });
   tslTrigger.disabled = !cfg.trailing_sl_enabled;
   tslStep.disabled = !cfg.trailing_sl_enabled;
-  tslCheck.onchange = () => {
-    cfg.trailing_sl_enabled = tslCheck.checked;
-    tslTrigger.disabled = !tslCheck.checked;
-    tslStep.disabled = !tslCheck.checked;
-  };
   tslTrigger.onchange = () => { cfg.trailing_sl_trigger_pct = parseFloat(tslTrigger.value) || 0; };
   tslStep.onchange = () => { cfg.trailing_sl_step_pct = parseFloat(tslStep.value) || 0; };
+  const tslField = FormField({
+    label: 'Trailing Stop Loss',
+    rightControl: tslToggle.el,
+    input: [
+      el('span', { class: 'unit' }, 'trigger'),
+      tslTrigger,
+      el('span', { class: 'unit' }, '% profit · step'),
+      tslStep,
+      el('span', { class: 'unit' }, '%'),
+    ],
+    hint: 'Activates once profit reaches the trigger %, then ratchets SL every step % of further gain.',
+    disabled: !cfg.trailing_sl_enabled,
+  });
+  // tslField uses inline-row to keep inputs compact
+  tslField.querySelector('.form-field-input').classList.add('inline-row');
 
-  // Target
-  const tgtCheck = el('input', { type: 'checkbox' });
-  tgtCheck.checked = cfg.target_enabled;
+  // 4. Target
+  const tgtToggle = Toggle({
+    value: cfg.target_enabled,
+    onChange: (on) => {
+      cfg.target_enabled = on;
+      tgtInput.disabled = !on;
+      tgtField.classList.toggle('disabled', !on);
+    },
+  });
   const tgtInput = el('input', { type: 'number', min: '1', max: '500', step: '1', value: String(cfg.target_pct) });
   tgtInput.disabled = !cfg.target_enabled;
-  tgtCheck.onchange = () => {
-    cfg.target_enabled = tgtCheck.checked;
-    tgtInput.disabled = !tgtCheck.checked;
-  };
   tgtInput.onchange = () => { cfg.target_pct = parseFloat(tgtInput.value) || 0; };
+  const tgtField = FormField({
+    label: 'Target',
+    rightControl: tgtToggle.el,
+    input: [tgtInput, el('span', { class: 'unit' }, '% profit on entry premium')],
+    hint: 'Books the position when option premium rises by this %.',
+    disabled: !cfg.target_enabled,
+  });
 
-  // Time-based exit
-  const timeCheck = el('input', { type: 'checkbox' });
-  timeCheck.checked = cfg.time_exit_enabled;
-  const timeInput = el('input', { type: 'text', value: cfg.time_exit_at, placeholder: 'HH:MM', style: { width: '80px' } });
+  // 5. Time-based exit
+  const timeToggle = Toggle({
+    value: cfg.time_exit_enabled,
+    onChange: (on) => {
+      cfg.time_exit_enabled = on;
+      timeInput.disabled = !on;
+      timeField.classList.toggle('disabled', !on);
+    },
+  });
+  const timeInput = el('input', { type: 'text', value: cfg.time_exit_at, placeholder: 'HH:MM' });
   timeInput.disabled = !cfg.time_exit_enabled;
-  timeCheck.onchange = () => {
-    cfg.time_exit_enabled = timeCheck.checked;
-    timeInput.disabled = !timeCheck.checked;
-  };
   timeInput.onchange = () => {
     const v = timeInput.value.trim();
     if (/^\d{2}:\d{2}$/.test(v)) {
@@ -310,48 +363,44 @@ function renderExitSection(cfg) {
       timeInput.value = cfg.time_exit_at;
     }
   };
+  const timeField = FormField({
+    label: 'Time-based exit',
+    rightControl: timeToggle.el,
+    input: [timeInput, el('span', { class: 'unit' }, 'IST')],
+    hint: 'Squares off any open position at this clock time (independent of P&L).',
+    disabled: !cfg.time_exit_enabled,
+  });
+  timeField.querySelector('.form-field-input').classList.add('inline-row');
 
-  // Max positions per day
+  // 6. Max positions per day
   const maxPosInput = el('input', { type: 'number', min: '1', max: '50', value: String(cfg.max_positions_per_day) });
   maxPosInput.onchange = () => {
     cfg.max_positions_per_day = Math.max(1, parseInt(maxPosInput.value, 10) || 1);
     maxPosInput.value = String(cfg.max_positions_per_day);
   };
 
-  card.appendChild(el('div', { class: 'kv-grid' },
-    el('span', { class: 'label' }, 'Stop Loss (SL)'),
-    el('div', { class: 'row gap-8', style: { alignItems: 'center' } },
-      slCheck, slInput, el('span', { class: 'text-xs muted' }, '% drop from entry premium'),
-    ),
-    el('span', { class: 'label' }, 'Trailing SL'),
-    el('div', { class: 'row gap-8', style: { alignItems: 'center', flexWrap: 'wrap' } },
-      tslCheck,
-      el('span', { class: 'text-xs muted' }, 'trigger at'),
-      tslTrigger,
-      el('span', { class: 'text-xs muted' }, '% profit · step'),
-      tslStep,
-      el('span', { class: 'text-xs muted' }, '%'),
-    ),
-    el('span', { class: 'label' }, 'Target'),
-    el('div', { class: 'row gap-8', style: { alignItems: 'center' } },
-      tgtCheck, tgtInput, el('span', { class: 'text-xs muted' }, '% profit on entry premium'),
-    ),
-    el('span', { class: 'label' }, 'Time-based exit'),
-    el('div', { class: 'row gap-8', style: { alignItems: 'center' } },
-      timeCheck, timeInput, el('span', { class: 'text-xs muted' }, 'auto-exit at this IST time'),
-    ),
-    el('span', { class: 'label' }, 'Max positions per day'),
-    el('div', { class: 'row gap-8', style: { alignItems: 'center' } },
-      maxPosInput, el('span', { class: 'text-xs muted' }, 'caps total trades for the session'),
-    ),
-  ));
-
-  return card;
+  return section('Exit Conditions', [
+    FormField({
+      label: 'Exit on counter-crossover',
+      rightControl: crossExitToggle.el,
+      input: el('div', { class: 'form-field-hint', style: { color: 'var(--text)' } },
+        'Closes a CE position when a SELL crossover fires (and vice-versa) — the primary exit rule for this strategy.'),
+    }),
+    slField,
+    tslField,
+    tgtField,
+    timeField,
+    FormField({
+      label: 'Max positions per day',
+      input: [maxPosInput, el('span', { class: 'unit' }, 'trades')],
+      hint: 'Hard cap on total entries across all underlyings for the session.',
+    }),
+  ]);
 }
 
 function renderSaveBar(cfg, root) {
   return el('div', {
-    class: 'card settings-section',
+    class: 'card form-section',
     style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px' },
   },
     el('div', { class: 'text-xs muted' },
@@ -384,7 +433,6 @@ function renderSaveBar(cfg, root) {
 // ──────────────────────────────────────────────────────────────────────
 
 function renderOrders(root) {
-  // Tab strip
   const tabsEl = el('div', { class: 'subtabs', style: { marginBottom: '14px' } });
   ['open', 'closed'].forEach((id) => {
     tabsEl.appendChild(el('button', {
@@ -401,9 +449,8 @@ function renderOrders(root) {
     style: { fontSize: '11px' },
   }, cfg.mode === 'live' ? 'LIVE' : 'PAPER');
 
-  // Summary strip
   root.appendChild(el('div', {
-    class: 'card settings-section',
+    class: 'card form-section',
     style: { padding: '14px 16px' },
   },
     el('div', { class: 'row', style: { justifyContent: 'space-between', alignItems: 'center', gap: '12px', flexWrap: 'wrap' } },
@@ -423,15 +470,24 @@ function renderOrders(root) {
     ),
   ));
 
-  // Empty-state table (orders list will be wired to backend later)
-  const tableCard = el('div', { class: 'card settings-section' });
+  const tableCard = el('div', { class: 'card form-section' });
   const cols = orderTab === 'open'
     ? ['Time', 'Instrument', 'Strike', 'Type', 'Qty', 'Entry ₹', 'LTP ₹', 'P&L', 'SL', 'Target', 'Actions']
     : ['Entered', 'Exited', 'Instrument', 'Strike', 'Type', 'Qty', 'Entry ₹', 'Exit ₹', 'P&L', 'Reason'];
 
   const table = el('table', { class: 'data-table', style: { width: '100%' } });
   table.appendChild(el('thead', {},
-    el('tr', {}, ...cols.map((c) => el('th', { style: { textAlign: 'left', padding: '8px 10px', fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.5px', color: 'var(--text-muted)', borderBottom: '1px solid var(--border)' } }, c))),
+    el('tr', {}, ...cols.map((c) => el('th', {
+      style: {
+        textAlign: 'left',
+        padding: '8px 10px',
+        fontSize: '11px',
+        textTransform: 'uppercase',
+        letterSpacing: '0.5px',
+        color: 'var(--text-muted)',
+        borderBottom: '1px solid var(--border)',
+      },
+    }, c))),
   ));
   table.appendChild(el('tbody', {},
     el('tr', {},

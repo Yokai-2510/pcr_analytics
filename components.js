@@ -246,6 +246,11 @@ export function Select({ options = [], value = null, placeholder = 'Select…', 
     open = v;
     trigger.classList.toggle('open', v);
     menu.style.display = v ? '' : 'none';
+    // Cards establish their own stacking context via backdrop-filter, so a
+    // dropdown menu inside a card can be clipped behind sibling cards. Lift
+    // the containing card while this menu is open and drop it back on close.
+    const card = wrap.closest('.card');
+    if (card) card.classList.toggle('has-open-dropdown', v);
     if (v) {
       _activeSelect = wrap;
       focusIdx = currentOptions.findIndex(o => o.value === currentValue);
@@ -283,6 +288,79 @@ export function Select({ options = [], value = null, placeholder = 'Select…', 
     setValue: (v) => { currentValue = v; renderValue(); },
     setOptions: (opts) => { currentOptions = opts; renderValue(); },
   };
+}
+
+// ---- Toggle switch (iOS-style slider) ----
+// Returns { el, get, set }. `danger: true` renders red when on (use for
+// destructive switches like paper -> live).
+export function Toggle({ value = false, onChange, danger = false } = {}) {
+  let on = !!value;
+  const track = el('span', { class: 'toggle-track' }, el('span', { class: 'toggle-thumb' }));
+  const wrap = el('label', { class: 'toggle-switch' + (danger ? ' danger' : '') + (on ? ' on' : '') },
+    el('input', { type: 'checkbox' }),
+    track,
+  );
+  wrap.addEventListener('click', (e) => {
+    e.preventDefault();
+    on = !on;
+    wrap.classList.toggle('on', on);
+    if (typeof onChange === 'function') onChange(on);
+  });
+  return {
+    el: wrap,
+    get: () => on,
+    set: (v) => { on = !!v; wrap.classList.toggle('on', on); },
+  };
+}
+
+// ---- Chip multi-picker (generic version of WeekdayPicker) ----
+// options: [{ value, label }]. Returns { el, get, set }.
+export function ChipMultiPicker({ options = [], value = [], onChange } = {}) {
+  let selected = new Set(value);
+  const wrap = el('div', { class: 'weekday-picker' });
+  options.forEach(opt => {
+    const chip = el('button', {
+      type: 'button',
+      class: 'weekday-chip' + (selected.has(opt.value) ? ' active' : ''),
+      'data-value': opt.value,
+      onclick: () => {
+        if (selected.has(opt.value)) selected.delete(opt.value);
+        else selected.add(opt.value);
+        chip.classList.toggle('active');
+        if (typeof onChange === 'function') onChange([...selected]);
+      },
+    }, opt.label);
+    wrap.appendChild(chip);
+  });
+  return {
+    el: wrap,
+    get: () => [...selected],
+    set: (v) => {
+      selected = new Set(v || []);
+      wrap.querySelectorAll('.weekday-chip').forEach(c => {
+        c.classList.toggle('active', selected.has(c.dataset.value));
+      });
+    },
+  };
+}
+
+// ---- FormField — vertical layout: [label + right control] / [input] / [hint] ----
+// label: string (required). input: any DOM node. hint: optional string.
+// rightControl: optional DOM node rendered on the label row (e.g. a toggle).
+// disabled: optional boolean — greys input + hint.
+export function FormField({ label, input, hint, rightControl, disabled = false } = {}) {
+  const header = el('div', { class: 'form-field-header' },
+    el('span', { class: 'form-field-label' }, label),
+    rightControl ? rightControl : null,
+  );
+  const inputWrap = el('div', { class: 'form-field-input' });
+  if (input) {
+    if (input.nodeType) inputWrap.appendChild(input);
+    else if (Array.isArray(input)) input.forEach(n => n && inputWrap.appendChild(n));
+  }
+  const node = el('div', { class: 'form-field' + (disabled ? ' disabled' : '') }, header, inputWrap);
+  if (hint) node.appendChild(el('div', { class: 'form-field-hint' }, hint));
+  return node;
 }
 
 // ---- WeekdayPicker ----
