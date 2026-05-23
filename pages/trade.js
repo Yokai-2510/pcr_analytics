@@ -143,10 +143,10 @@ function renderEntrySection(cfg) {
       alignItems: 'center',
     },
   },
-    el('span', { class: 'mono', style: { textAlign: 'right' } }, 'CE cumm < PE cumm  before crossover'),
+    el('span', { class: 'mono', style: { textAlign: 'right' } }, 'CE cumm > PE cumm before crossover'),
     el('span', { class: 'mono', style: { color: 'var(--text-muted)' } }, '→'),
     el('span', { class: 'mono bull', style: { fontWeight: 600 } }, 'BUY CE'),
-    el('span', { class: 'mono', style: { textAlign: 'right' } }, 'PE cumm < CE cumm  before crossover'),
+    el('span', { class: 'mono', style: { textAlign: 'right' } }, 'PE cumm > CE cumm before crossover'),
     el('span', { class: 'mono', style: { color: 'var(--text-muted)' } }, '→'),
     el('span', { class: 'mono bear', style: { fontWeight: 600 } }, 'BUY PE'),
   );
