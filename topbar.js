@@ -6,6 +6,7 @@ const TABS = [
   { id: 'dashboard', label: 'Dashboard' },
   { id: 'charts', label: 'Charts' },
   { id: 'data', label: 'Data' },
+  { id: 'trade', label: 'Trade' },
   { id: 'settings', label: 'Settings' },
 ];
 
