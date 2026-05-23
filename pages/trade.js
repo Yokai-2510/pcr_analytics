@@ -89,10 +89,10 @@ export function unmount() {}
 function renderConfigs(root) {
   const cfg = loadConfig();
 
+  root.appendChild(renderSaveBar(cfg, root));
   root.appendChild(renderEntrySection(cfg));
   root.appendChild(renderInstrumentSection(cfg));
   root.appendChild(renderExitSection(cfg));
-  root.appendChild(renderSaveBar(cfg, root));
 }
 
 function section(title, fields) {
@@ -401,7 +401,15 @@ function renderExitSection(cfg) {
 function renderSaveBar(cfg, root) {
   return el('div', {
     class: 'card form-section',
-    style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px' },
+    style: {
+      display: 'flex',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      gap: '12px',
+      position: 'sticky',
+      top: '64px',
+      zIndex: '40',
+    },
   },
     el('div', { class: 'text-xs muted' },
       'Saved to your browser. Execution engine wiring is pending — these settings will drive it once available.',
