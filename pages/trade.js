@@ -1,24 +1,20 @@
-// pages/trade.js — paper/live trading config + open/closed orders
-// Backend execution wiring is pending; for now all config is persisted to
-// localStorage and Orders subtab shows empty-state tables.
+// pages/trade.js — paper trading: Configs, Orders, Reports
+// Config and orders live in the backend (/api/trade/*). LocalStorage is a
+// fallback when the API is unreachable so the UI never goes blank.
 import { el, toast, Select, Toggle, ChipMultiPicker, FormField } from '../components.js';
+import { api } from '../api.js';
 
 const STORAGE_KEY = 'trade_config_v1';
 
 const DEFAULT_CONFIG = {
-  // Entry conditions
-  mode: 'paper',                          // 'paper' | 'live'
+  mode: 'paper',
   auto_execute: false,
   cooldown_minutes: 0,
-
-  // Instrument & quantity — multi-select underlyings
-  instruments: ['nifty'],                 // any subset of ['nifty','banknifty','sensex']
-  strike_mode: 'atm',                     // 'atm' | 'atm_plus_1' | 'atm_minus_1' | 'custom'
+  instruments: ['nifty'],
+  strike_mode: 'atm',
   custom_strike: null,
   lots: 1,
-
-  // Exit conditions
-  exit_on_counter_crossover: true,        // first-class exit rule
+  exit_on_counter_crossover: true,
   stop_loss_enabled: true,
   stop_loss_pct: 30,
   trailing_sl_enabled: false,
@@ -36,16 +32,26 @@ const INSTRUMENT_LABEL = { nifty: 'NIFTY', banknifty: 'BankNIFTY', sensex: 'Sens
 
 let subTab = 'configs';
 let orderTab = 'open';
+let reportDate = null;       // selected date in Reports subtab
+let _pollTimer = null;       // shared polling timer for live subtabs
 
-function loadConfig() {
+async function loadConfig() {
   try {
-    return { ...DEFAULT_CONFIG, ...JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}') };
+    const res = await api.getTradeConfig();
+    const cfg = { ...DEFAULT_CONFIG, ...(res?.config || {}) };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));   // mirror for offline read
+    return cfg;
   } catch (e) {
-    return { ...DEFAULT_CONFIG };
+    try {
+      return { ...DEFAULT_CONFIG, ...JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}') };
+    } catch (_) {
+      return { ...DEFAULT_CONFIG };
+    }
   }
 }
 
-function saveConfig(cfg) {
+async function saveConfig(cfg) {
+  await api.putTradeConfig(cfg);
   localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
 }
 
@@ -55,7 +61,7 @@ export async function mount(container) {
   container.appendChild(page);
 
   const subtabs = el('div', { class: 'subtabs' });
-  ['configs', 'orders'].forEach((id) => {
+  ['configs', 'orders', 'reports'].forEach((id) => {
     subtabs.appendChild(el('button', {
       class: 'subtab' + (subTab === id ? ' active' : ''),
       onclick: () => { subTab = id; render(); },
@@ -66,26 +72,32 @@ export async function mount(container) {
   const body = el('div', {});
   page.appendChild(body);
 
-  function render() {
+  async function render() {
+    _stopPoll();
     subtabs.querySelectorAll('.subtab').forEach((b) => {
       b.classList.toggle('active', b.textContent.toLowerCase() === subTab);
     });
     body.innerHTML = '';
-    if (subTab === 'configs') renderConfigs(body);
-    else renderOrders(body);
+    if (subTab === 'configs') await renderConfigs(body);
+    else if (subTab === 'orders') await renderOrders(body);
+    else await renderReports(body);
   }
 
-  render();
+  await render();
 }
 
-export function unmount() {}
+export function unmount() { _stopPoll(); }
+
+function _stopPoll() {
+  if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
+}
 
 // ──────────────────────────────────────────────────────────────────────
-// Configs subtab — Entry / Instrument / Exit sections (vertical, scrollable)
+// Configs subtab
 // ──────────────────────────────────────────────────────────────────────
 
-function renderConfigs(root) {
-  const cfg = loadConfig();
+async function renderConfigs(root) {
+  const cfg = await loadConfig();
 
   root.appendChild(renderSaveBar(cfg, root));
   root.appendChild(renderEntrySection(cfg));
@@ -103,7 +115,6 @@ function section(title, fields) {
 }
 
 function renderEntrySection(cfg) {
-  // Paper / Live toggle — danger-styled when on (LIVE)
   const modeToggle = Toggle({
     value: cfg.mode === 'live',
     danger: true,
@@ -127,9 +138,6 @@ function renderEntrySection(cfg) {
     onChange: (on) => { cfg.auto_execute = on; },
   });
 
-  // Entry direction is derived, not configured. At a crossover, whichever
-  // side's cumulative OI change was lower just before the crossover is the
-  // side that gets bought. Show the rule rather than offer toggles.
   const directionRules = el('div', {
     style: {
       display: 'grid',
@@ -230,10 +238,7 @@ function renderInstrumentSection(cfg) {
   };
   const lotInfo = el('div', { class: 'form-field-hint' }, formatLotInfo(cfg));
 
-  const lotField = FormField({
-    label: 'Lots per entry',
-    input: lotsInput,
-  });
+  const lotField = FormField({ label: 'Lots per entry', input: lotsInput });
   lotField.appendChild(lotInfo);
 
   return section('Instrument & Quantity', [
@@ -254,21 +259,18 @@ function renderInstrumentSection(cfg) {
 
 function formatLotInfo(cfg) {
   if (!cfg.instruments?.length) return 'No underlying selected — pick at least one above.';
-  const parts = cfg.instruments.map((ins) => {
+  return cfg.instruments.map((ins) => {
     const lot = LOT_SIZES[ins] || 0;
     return `${INSTRUMENT_LABEL[ins]}: ${cfg.lots} × ${lot} = ${cfg.lots * lot} units`;
-  });
-  return parts.join('   ·   ');
+  }).join('   ·   ');
 }
 
 function renderExitSection(cfg) {
-  // 1. Exit on counter-crossover — most important, lives at the top
   const crossExitToggle = Toggle({
     value: cfg.exit_on_counter_crossover,
     onChange: (on) => { cfg.exit_on_counter_crossover = on; },
   });
 
-  // 2. Stop Loss
   const slToggle = Toggle({
     value: cfg.stop_loss_enabled,
     onChange: (on) => {
@@ -281,14 +283,12 @@ function renderExitSection(cfg) {
   slInput.disabled = !cfg.stop_loss_enabled;
   slInput.onchange = () => { cfg.stop_loss_pct = parseFloat(slInput.value) || 0; };
   const slField = FormField({
-    label: 'Stop Loss',
-    rightControl: slToggle.el,
+    label: 'Stop Loss', rightControl: slToggle.el,
     input: [slInput, el('span', { class: 'unit' }, '% drop from entry premium')],
     hint: 'Exits the position when the option premium falls by this %.',
     disabled: !cfg.stop_loss_enabled,
   });
 
-  // 3. Trailing SL — two inputs
   const tslToggle = Toggle({
     value: cfg.trailing_sl_enabled,
     onChange: (on) => {
@@ -305,22 +305,17 @@ function renderExitSection(cfg) {
   tslTrigger.onchange = () => { cfg.trailing_sl_trigger_pct = parseFloat(tslTrigger.value) || 0; };
   tslStep.onchange = () => { cfg.trailing_sl_step_pct = parseFloat(tslStep.value) || 0; };
   const tslField = FormField({
-    label: 'Trailing Stop Loss',
-    rightControl: tslToggle.el,
+    label: 'Trailing Stop Loss', rightControl: tslToggle.el,
     input: [
-      el('span', { class: 'unit' }, 'trigger'),
-      tslTrigger,
-      el('span', { class: 'unit' }, '% profit · step'),
-      tslStep,
+      el('span', { class: 'unit' }, 'trigger'), tslTrigger,
+      el('span', { class: 'unit' }, '% profit · step'), tslStep,
       el('span', { class: 'unit' }, '%'),
     ],
     hint: 'Activates once profit reaches the trigger %, then ratchets SL every step % of further gain.',
     disabled: !cfg.trailing_sl_enabled,
   });
-  // tslField uses inline-row to keep inputs compact
   tslField.querySelector('.form-field-input').classList.add('inline-row');
 
-  // 4. Target
   const tgtToggle = Toggle({
     value: cfg.target_enabled,
     onChange: (on) => {
@@ -333,14 +328,12 @@ function renderExitSection(cfg) {
   tgtInput.disabled = !cfg.target_enabled;
   tgtInput.onchange = () => { cfg.target_pct = parseFloat(tgtInput.value) || 0; };
   const tgtField = FormField({
-    label: 'Target',
-    rightControl: tgtToggle.el,
+    label: 'Target', rightControl: tgtToggle.el,
     input: [tgtInput, el('span', { class: 'unit' }, '% profit on entry premium')],
     hint: 'Books the position when option premium rises by this %.',
     disabled: !cfg.target_enabled,
   });
 
-  // 5. Time-based exit
   const timeToggle = Toggle({
     value: cfg.time_exit_enabled,
     onChange: (on) => {
@@ -353,23 +346,17 @@ function renderExitSection(cfg) {
   timeInput.disabled = !cfg.time_exit_enabled;
   timeInput.onchange = () => {
     const v = timeInput.value.trim();
-    if (/^\d{2}:\d{2}$/.test(v)) {
-      cfg.time_exit_at = v;
-    } else {
-      toast('Time must be HH:MM', 'warn');
-      timeInput.value = cfg.time_exit_at;
-    }
+    if (/^\d{2}:\d{2}$/.test(v)) cfg.time_exit_at = v;
+    else { toast('Time must be HH:MM', 'warn'); timeInput.value = cfg.time_exit_at; }
   };
   const timeField = FormField({
-    label: 'Time-based exit',
-    rightControl: timeToggle.el,
+    label: 'Time-based exit', rightControl: timeToggle.el,
     input: [timeInput, el('span', { class: 'unit' }, 'IST')],
     hint: 'Squares off any open position at this clock time (independent of P&L).',
     disabled: !cfg.time_exit_enabled,
   });
   timeField.querySelector('.form-field-input').classList.add('inline-row');
 
-  // 6. Max positions per day
   const maxPosInput = el('input', { type: 'number', min: '1', max: '50', value: String(cfg.max_positions_per_day) });
   maxPosInput.onchange = () => {
     cfg.max_positions_per_day = Math.max(1, parseInt(maxPosInput.value, 10) || 1);
@@ -378,15 +365,11 @@ function renderExitSection(cfg) {
 
   return section('Exit Conditions', [
     FormField({
-      label: 'Exit on counter-crossover',
-      rightControl: crossExitToggle.el,
+      label: 'Exit on counter-crossover', rightControl: crossExitToggle.el,
       input: el('div', { class: 'form-field-hint', style: { color: 'var(--text)' } },
         'Closes a CE position when a SELL crossover fires (and vice-versa) — the primary exit rule for this strategy.'),
     }),
-    slField,
-    tslField,
-    tgtField,
-    timeField,
+    slField, tslField, tgtField, timeField,
     FormField({
       label: 'Max positions per day',
       input: [maxPosInput, el('span', { class: 'unit' }, 'trades')],
@@ -399,34 +382,34 @@ function renderSaveBar(cfg, root) {
   return el('div', {
     class: 'card form-section',
     style: {
-      display: 'flex',
-      justifyContent: 'space-between',
-      alignItems: 'center',
-      gap: '12px',
-      position: 'sticky',
-      top: '64px',
-      zIndex: '40',
+      display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+      gap: '12px', position: 'sticky', top: '64px', zIndex: '40',
     },
   },
     el('div', { class: 'text-xs muted' },
-      'Saved to your browser. Execution engine wiring is pending — these settings will drive it once available.',
+      'Saved to the backend. The engine re-reads the active config on every tick — changes apply within ~1 second.',
     ),
     el('div', { class: 'row gap-8' },
       el('button', {
         class: 'btn ghost sm',
-        onclick: () => {
+        onclick: async () => {
           if (!confirm('Reset all trade configs to defaults?')) return;
-          localStorage.removeItem(STORAGE_KEY);
+          try { await saveConfig({ ...DEFAULT_CONFIG }); }
+          catch (e) { toast('Reset failed: ' + e.message, 'error'); return; }
           root.innerHTML = '';
-          renderConfigs(root);
+          await renderConfigs(root);
           toast('Reset to defaults', 'info');
         },
       }, 'Reset'),
       el('button', {
         class: 'btn primary sm',
-        onclick: () => {
-          saveConfig(cfg);
-          toast('Trade configs saved', 'success');
+        onclick: async () => {
+          try {
+            await saveConfig(cfg);
+            toast('Trade configs saved', 'success');
+          } catch (e) {
+            toast('Save failed: ' + (e.message || 'unknown'), 'error');
+          }
         },
       }, 'Save'),
     ),
@@ -434,10 +417,13 @@ function renderSaveBar(cfg, root) {
 }
 
 // ──────────────────────────────────────────────────────────────────────
-// Orders subtab — Open / Closed for today
+// Orders subtab — Open / Closed for today, polled
 // ──────────────────────────────────────────────────────────────────────
 
-function renderOrders(root) {
+async function renderOrders(root) {
+  _stopPoll();
+  root.innerHTML = '';
+
   const tabsEl = el('div', { class: 'subtabs', style: { marginBottom: '14px' } });
   ['open', 'closed'].forEach((id) => {
     tabsEl.appendChild(el('button', {
@@ -445,77 +431,324 @@ function renderOrders(root) {
       onclick: () => { orderTab = id; renderOrders(root); },
     }, id === 'open' ? 'Open positions' : 'Closed positions'));
   });
-  root.innerHTML = '';
   root.appendChild(tabsEl);
 
-  const cfg = loadConfig();
-  const modePill = el('span', {
-    class: cfg.mode === 'live' ? 'change-pill bear' : 'change-pill bull',
-    style: { fontSize: '11px' },
-  }, cfg.mode === 'live' ? 'LIVE' : 'PAPER');
+  const summaryCard = el('div', { class: 'card form-section', style: { padding: '14px 16px' } });
+  const tableCard = el('div', { class: 'card form-section' });
+  root.appendChild(summaryCard);
+  root.appendChild(tableCard);
 
-  root.appendChild(el('div', {
-    class: 'card form-section',
-    style: { padding: '14px 16px' },
+  async function refresh() {
+    try {
+      const [posRes, sumRes, cfgRes] = await Promise.all([
+        api.tradePositions(`?status=${orderTab}`),
+        api.tradeSummary(),
+        api.getTradeConfig().catch(() => ({ config: {} })),
+      ]);
+      paintSummary(summaryCard, sumRes, cfgRes.config, orderTab);
+      paintPositions(tableCard, posRes.positions || [], orderTab);
+    } catch (e) {
+      summaryCard.innerHTML = '';
+      summaryCard.appendChild(el('div', { class: 'empty-state' },
+        el('span', { class: 'bear' }, 'Failed to load orders'),
+        el('span', { class: 'text-xs mono dim' }, e.message || 'network error'),
+      ));
+    }
+  }
+
+  await refresh();
+  _pollTimer = setInterval(refresh, 3000);
+}
+
+function paintSummary(card, summary, cfg, tab) {
+  card.innerHTML = '';
+  const modePill = el('span', {
+    class: cfg?.mode === 'live' ? 'change-pill bear' : 'change-pill bull',
+    style: { fontSize: '11px' },
+  }, cfg?.mode === 'live' ? 'LIVE' : 'PAPER');
+  const winRate = summary.win_rate != null
+    ? `${(summary.win_rate * 100).toFixed(1)}%` : '—';
+  card.appendChild(el('div', {
+    class: 'row',
+    style: { justifyContent: 'space-between', alignItems: 'center', gap: '12px', flexWrap: 'wrap' },
   },
-    el('div', { class: 'row', style: { justifyContent: 'space-between', alignItems: 'center', gap: '12px', flexWrap: 'wrap' } },
-      el('div', { class: 'row gap-8', style: { alignItems: 'center' } },
-        el('div', { style: { fontSize: '13px', fontWeight: 600 } },
-          orderTab === 'open' ? 'Today · Open positions' : 'Today · Closed positions',
-        ),
-        modePill,
-      ),
-      el('div', { class: 'row gap-8', style: { flexWrap: 'wrap' } },
-        statBlock('Trades today', '0'),
-        statBlock('Open', '0'),
-        statBlock('Realized P&L', '—'),
-        statBlock('Unrealized P&L', '—'),
-        statBlock('Win rate', '—'),
-      ),
+    el('div', { class: 'row gap-8', style: { alignItems: 'center' } },
+      el('div', { style: { fontSize: '13px', fontWeight: 600 } },
+        tab === 'open' ? 'Today · Open positions' : 'Today · Closed positions'),
+      modePill,
+    ),
+    el('div', { class: 'row gap-8', style: { flexWrap: 'wrap' } },
+      statBlock('Trades today', String(summary.trades_total ?? 0)),
+      statBlock('Open', String(summary.trades_open_at_eod ?? 0)),
+      statBlock('Closed', String(summary.trades_closed ?? 0)),
+      statBlock('Realized P&L', fmtPnL(summary.gross_pnl)),
+      statBlock('Win rate', winRate),
     ),
   ));
+}
 
-  const tableCard = el('div', { class: 'card form-section' });
-  const cols = orderTab === 'open'
-    ? ['Time', 'Instrument', 'Strike', 'Type', 'Qty', 'Entry ₹', 'LTP ₹', 'P&L', 'SL', 'Target', 'Actions']
+function paintPositions(card, positions, tab) {
+  card.innerHTML = '';
+  const cols = tab === 'open'
+    ? ['Time', 'Instrument', 'Strike', 'Type', 'Qty', 'Entry ₹', 'LTP ₹', 'P&L', 'SL', 'Target', '']
     : ['Entered', 'Exited', 'Instrument', 'Strike', 'Type', 'Qty', 'Entry ₹', 'Exit ₹', 'P&L', 'Reason'];
 
   const table = el('table', { class: 'data-table', style: { width: '100%' } });
   table.appendChild(el('thead', {},
     el('tr', {}, ...cols.map((c) => el('th', {
       style: {
-        textAlign: 'left',
-        padding: '8px 10px',
-        fontSize: '11px',
-        textTransform: 'uppercase',
-        letterSpacing: '0.5px',
-        color: 'var(--text-muted)',
-        borderBottom: '1px solid var(--border)',
+        textAlign: 'left', padding: '8px 10px', fontSize: '11px',
+        textTransform: 'uppercase', letterSpacing: '0.5px',
+        color: 'var(--text-muted)', borderBottom: '1px solid var(--border)',
       },
     }, c))),
   ));
-  table.appendChild(el('tbody', {},
-    el('tr', {},
-      el('td', {
-        colspan: cols.length,
-        style: { padding: '32px 16px', textAlign: 'center', color: 'var(--text-muted)' },
-      },
+
+  const tbody = el('tbody');
+  if (!positions.length) {
+    tbody.appendChild(el('tr', {},
+      el('td', { colspan: cols.length, style: { padding: '32px 16px', textAlign: 'center', color: 'var(--text-muted)' } },
         el('div', { style: { fontSize: '13px', fontWeight: 600, color: 'var(--text)', marginBottom: '4px' } },
-          orderTab === 'open' ? 'No open positions' : 'No closed positions for today',
-        ),
-        el('div', { class: 'text-xs muted' },
-          'Trades will appear here once the execution engine is wired up.',
-        ),
+          tab === 'open' ? 'No open positions' : 'No closed positions for today'),
+        el('div', { class: 'text-xs mono dim' },
+          'Trades land here as the engine fires entries and exits.'),
       ),
+    ));
+  } else if (tab === 'open') {
+    positions.forEach((p) => tbody.appendChild(openRow(p)));
+  } else {
+    positions.forEach((p) => tbody.appendChild(closedRow(p)));
+  }
+  table.appendChild(tbody);
+  card.appendChild(table);
+}
+
+function openRow(p) {
+  const ltp = p.live_ltp;
+  const pnl = p.unrealized_pnl;
+  return el('tr', { class: 'data-row' },
+    cell(fmtTime(p.entry_time)),
+    cell(p.instrument),
+    cell(p.strike),
+    cell(p.option_type, p.option_type === 'CE' ? 'bull' : 'bear'),
+    cell(p.qty),
+    cell(fmtRupee(p.entry_price)),
+    cell(ltp != null ? fmtRupee(ltp) : '—'),
+    cell(pnl != null ? fmtPnL(pnl) : '—', pnl != null ? (pnl >= 0 ? 'bull' : 'bear') : ''),
+    cell(p.sl_price != null ? fmtRupee(p.sl_price) : '—'),
+    cell(p.target_price != null ? fmtRupee(p.target_price) : '—'),
+    el('td', { style: { padding: '6px 10px', textAlign: 'right' } },
+      el('button', {
+        class: 'btn ghost sm',
+        onclick: async () => {
+          if (!confirm(`Close position ${p.id} (${p.instrument} ${p.strike} ${p.option_type})?`)) return;
+          try {
+            await api.tradeManualExit(p.id);
+            toast('Exit queued', 'success');
+          } catch (e) {
+            toast('Exit failed: ' + (e.message || 'unknown'), 'error');
+          }
+        },
+      }, 'Close'),
+    ),
+  );
+}
+
+function closedRow(p) {
+  return el('tr', { class: 'data-row' },
+    cell(fmtTime(p.entry_time)),
+    cell(fmtTime(p.exit_time)),
+    cell(p.instrument),
+    cell(p.strike),
+    cell(p.option_type, p.option_type === 'CE' ? 'bull' : 'bear'),
+    cell(p.qty),
+    cell(fmtRupee(p.entry_price)),
+    cell(fmtRupee(p.exit_price)),
+    cell(fmtPnL(p.pnl), p.pnl != null && p.pnl >= 0 ? 'bull' : 'bear'),
+    cell(formatExitReason(p.exit_reason)),
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Reports subtab — per-date history
+// ──────────────────────────────────────────────────────────────────────
+
+async function renderReports(root) {
+  _stopPoll();
+  root.innerHTML = '';
+
+  let dates = [];
+  try {
+    const res = await api.tradeReportDates();
+    dates = res.dates || [];
+  } catch (e) {
+    root.appendChild(el('div', { class: 'empty-state' },
+      el('span', { class: 'bear' }, 'Failed to load reports'),
+      el('span', { class: 'text-xs mono dim' }, e.message || 'network error'),
+    ));
+    return;
+  }
+
+  if (!dates.length) {
+    root.appendChild(el('div', { class: 'card empty-state' },
+      el('div', { style: { fontSize: '14px', fontWeight: 600, color: 'var(--text)', marginBottom: '4px' } },
+        'No trade reports yet'),
+      el('div', { class: 'text-xs muted' },
+        'Reports appear here once the engine has fired at least one trade on a given date.'),
+    ));
+    return;
+  }
+
+  if (!reportDate || !dates.includes(reportDate)) reportDate = dates[0];
+
+  // Picker bar
+  const sel = Select({
+    options: dates.map((d) => ({ value: d, label: d })),
+    value: reportDate,
+    onChange: async (v) => { reportDate = v; await paintReport(); },
+  });
+  const pickerCard = el('div', { class: 'card form-section', style: { padding: '14px 16px' } },
+    el('div', { class: 'row gap-8', style: { alignItems: 'center', flexWrap: 'wrap' } },
+      el('span', { class: 'label' }, 'DATE'),
+      sel.el,
+      el('span', { class: 'text-xs muted' }, `${dates.length} date${dates.length === 1 ? '' : 's'} on record`),
+    ),
+  );
+  root.appendChild(pickerCard);
+
+  const summaryCard = el('div', { class: 'card form-section', style: { padding: '14px 16px' } });
+  const breakdownCard = el('div', { class: 'card form-section' });
+  const positionsCard = el('div', { class: 'card form-section' });
+  root.appendChild(summaryCard);
+  root.appendChild(breakdownCard);
+  root.appendChild(positionsCard);
+
+  async function paintReport() {
+    try {
+      const [report, posRes] = await Promise.all([
+        api.tradeReport(reportDate),
+        api.tradePositions(`?date=${reportDate}&status=closed`),
+      ]);
+      paintReportSummary(summaryCard, report);
+      paintReportBreakdown(breakdownCard, report);
+      paintPositions(positionsCard, posRes.positions || [], 'closed');
+    } catch (e) {
+      summaryCard.innerHTML = '';
+      summaryCard.appendChild(el('div', { class: 'empty-state' },
+        el('span', { class: 'bear' }, 'Failed to load report'),
+        el('span', { class: 'text-xs mono dim' }, e.message || 'network error'),
+      ));
+    }
+  }
+
+  await paintReport();
+}
+
+function paintReportSummary(card, report) {
+  card.innerHTML = '';
+  const winRate = report.win_rate != null ? `${(report.win_rate * 100).toFixed(1)}%` : '—';
+  card.appendChild(el('div', {
+    class: 'row',
+    style: { justifyContent: 'space-between', alignItems: 'center', gap: '12px', flexWrap: 'wrap' },
+  },
+    el('div', {},
+      el('div', { style: { fontSize: '13px', fontWeight: 600 } }, `Report · ${report.date}`),
+      el('div', { class: 'text-xs muted', style: { marginTop: '2px' } },
+        `Generated ${fmtTime(report.generated_at)}` +
+        (report.modes?.length ? `  ·  modes: ${report.modes.join(', ')}` : '')),
+    ),
+    el('div', { class: 'row gap-8', style: { flexWrap: 'wrap' } },
+      statBlock('Trades', String(report.trades_total ?? 0)),
+      statBlock('Closed', String(report.trades_closed ?? 0)),
+      statBlock('Open at EOD', String(report.trades_open_at_eod ?? 0)),
+      statBlock('Wins', String(report.wins ?? 0)),
+      statBlock('Losses', String(report.losses ?? 0)),
+      statBlock('Win rate', winRate),
+      statBlock('Gross P&L', fmtPnL(report.gross_pnl)),
+      statBlock('Best trade', fmtPnL(report.best_trade_pnl)),
+      statBlock('Worst trade', fmtPnL(report.worst_trade_pnl)),
     ),
   ));
-  tableCard.appendChild(table);
-  root.appendChild(tableCard);
 }
+
+function paintReportBreakdown(card, report) {
+  card.innerHTML = '';
+  card.appendChild(el('h3', {}, 'Breakdown'));
+  const grid = el('div', {
+    style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px' },
+  });
+
+  const byInst = report.by_instrument || {};
+  const byReason = report.by_exit_reason || {};
+  const bySide = report.by_side || {};
+
+  grid.appendChild(breakdownTable('By instrument', byInst, (v) => `${v.trades} trades · ${fmtPnL(v.pnl)}`));
+  grid.appendChild(breakdownTable('By exit reason', byReason, (v) => `${v} trades`));
+  grid.appendChild(breakdownTable('By side', bySide, (v) => `${v} trades`));
+
+  card.appendChild(grid);
+}
+
+function breakdownTable(title, dict, fmt) {
+  const wrap = el('div', { class: 'form-field-input', style: { flexDirection: 'column', alignItems: 'stretch' } });
+  wrap.appendChild(el('div', { class: 'label', style: { marginBottom: '6px' } }, title));
+  const keys = Object.keys(dict || {});
+  if (!keys.length) {
+    wrap.appendChild(el('div', { class: 'text-xs muted' }, '—'));
+    return wrap;
+  }
+  keys.forEach((k) => {
+    wrap.appendChild(el('div', {
+      class: 'row',
+      style: { justifyContent: 'space-between', padding: '4px 0', borderBottom: '1px solid var(--border)' },
+    },
+      el('span', { class: 'mono', style: { fontSize: '12px' } }, formatExitReason(k)),
+      el('span', { class: 'mono text-xs', style: { color: 'var(--text-muted)' } }, fmt(dict[k])),
+    ));
+  });
+  return wrap;
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// helpers
+// ──────────────────────────────────────────────────────────────────────
 
 function statBlock(label, value) {
   return el('div', { style: { minWidth: '110px' } },
     el('div', { class: 'label' }, label),
     el('div', { class: 'mono', style: { fontSize: '14px', fontWeight: 600 } }, value),
   );
+}
+
+function cell(value, klass = '') {
+  return el('td', {
+    style: { padding: '6px 10px', borderBottom: '1px solid var(--border)' },
+    class: 'mono' + (klass ? ' ' + klass : ''),
+  }, value == null ? '—' : String(value));
+}
+
+function fmtTime(iso) {
+  if (!iso) return '—';
+  // "2026-05-25T09:16:00+05:30" → "09:16:00"
+  return iso.slice(11, 19);
+}
+
+function fmtRupee(v) {
+  if (v == null || isNaN(v)) return '—';
+  return Number(v).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function fmtPnL(v) {
+  if (v == null || isNaN(v)) return '—';
+  const n = Number(v);
+  const sign = n >= 0 ? '+' : '';
+  return sign + n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function formatExitReason(reason) {
+  if (!reason) return '—';
+  return String(reason)
+    .replace(/^exit_/, '')
+    .replace(/_/g, ' ')
+    .replace(/\b\w/g, (c) => c.toUpperCase());
 }

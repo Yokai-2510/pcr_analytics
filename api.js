@@ -84,6 +84,18 @@ export const api = {
   credentialsReveal: () => fetchJson('/api/credentials/reveal'),
   testUpstox: () => fetchJson('/api/upstox/test', { method: 'POST', silent: true }),
   refreshUpstoxToken: () => fetchJson('/api/upstox/refresh-token', { method: 'POST', silent: true, timeoutMs: 120000 }),
+
+  // ---- Trade subsystem (paper trading) ----
+  getTradeConfig: () => fetchJson('/api/trade/config'),
+  putTradeConfig: (config) => fetchJson('/api/trade/config', {
+    method: 'PUT', body: JSON.stringify({ config }),
+  }),
+  tradePositions: (params = '') => fetchJson(`/api/trade/positions${params}`),
+  tradeOrders: (date) => fetchJson(`/api/trade/orders${date ? `?date=${date}` : ''}`),
+  tradeSummary: (date) => fetchJson(`/api/trade/summary${date ? `?date=${date}` : ''}`),
+  tradeManualExit: (positionId) => fetchJson(`/api/trade/positions/${positionId}/exit`, { method: 'POST' }),
+  tradeReportDates: () => fetchJson('/api/trade/reports'),
+  tradeReport: (date) => fetchJson(`/api/trade/reports/${date}`),
   patchUpstox: (body) => fetchJson('/api/credentials/upstox', { method: 'PATCH', body: JSON.stringify(body) }),
   patchAdmin: (body) => fetchJson('/api/credentials/admin', { method: 'PATCH', body: JSON.stringify(body) }),
   rotateAdmin: () => fetchJson('/api/credentials/admin/rotate', { method: 'POST' }),
