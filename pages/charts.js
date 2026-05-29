@@ -1,5 +1,5 @@
 // pages/charts.js — workspace (grids up to 3x2) + tabs (1x1 fullview each)
-import { el, toast, modal, icon, CHART_AXIS_STYLE, Select, DateSelect } from '../components.js';
+import { el, toast, modal, icon, CHART_AXIS_STYLE, Select, DateSelect, filterMarketHours } from '../components.js';
 import { api } from '../api.js';
 import { store } from '../store.js';
 
@@ -192,6 +192,11 @@ export async function mount(container) {
         date: cfg.date || undefined,
       };
       const payload = await api.chartData(reqBody);
+      if (payload?.series) {
+        payload.series.forEach(s => {
+          if (Array.isArray(s.points)) s.points = filterMarketHours(s.points);
+        });
+      }
       const inst = chartInstances[id] || (chartInstances[id] = echarts.init(div, null, { renderer: 'canvas' }));
       renderEchart(inst, payload, cfg.chart_type || 'line');
     } catch (e) {

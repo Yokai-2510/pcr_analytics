@@ -1,5 +1,5 @@
 // pages/data.js — Snapshots data explorer (4-tab: OI Analytics / OI Logs / Entry Signals / All Logs)
-import { el, toast, fmtTimeIST, fmtDateIST, fmtNum, fmtCompact, fmtSigned, fmtPct, icon, Select, DateSelect } from '../components.js';
+import { el, toast, fmtTimeIST, fmtDateIST, fmtNum, fmtCompact, fmtSigned, fmtPct, icon, Select, DateSelect, filterMarketHours } from '../components.js';
 
 // Reusable client-side sortable table. Each col: { key, label, num, render(row) }.
 // Click cycles asc -> desc -> none. Numeric sort by default; pass num:false for
@@ -551,7 +551,8 @@ export async function mount(container) {
     }
     try {
       const data = await api.computedTicks(ts.instrument, ts.date);
-      const ticks = Array.isArray(data) ? data : (data.ticks || data.data || data.rows || []);
+      const rawTicks = Array.isArray(data) ? data : (data.ticks || data.data || data.rows || []);
+      const ticks = filterMarketHours(rawTicks);
       if (!ticks.length) {
         entrySignalsContent.innerHTML = '<div class="empty-state">No computed ticks for this date.</div>';
         return;
@@ -826,7 +827,7 @@ export async function mount(container) {
     try {
       const res = await api.dataQuery(body);
       currentResult = res;
-      allRows = res.rows || [];
+      allRows = filterMarketHours(res.rows || []);
 
       // Build header
       allLogsTable.innerHTML = '';
@@ -870,7 +871,8 @@ export async function mount(container) {
       api.totalOi(instrument, date),
       api.dashboard(60, date),
     ]);
-    const rows = Array.isArray(oiData) ? oiData : (oiData.data || oiData.rows || []);
+    const rawRows = Array.isArray(oiData) ? oiData : (oiData.data || oiData.rows || []);
+    const rows = filterMarketHours(rawRows);
     if (!rows.length) return null;
     const timeMap = new Map();
     rows.forEach(r => {
@@ -955,7 +957,7 @@ export async function mount(container) {
         instrument: ts.instrument, date: ts.date || undefined,
         columns: selectedCols, filters, sort: state.sort, page: p, page_size: 500,
       });
-      (res.rows || []).forEach(r => {
+      filterMarketHours(res.rows || []).forEach(r => {
         const row = {};
         cols.forEach(c => {
           const col = typeof c === 'string' ? c : c.id;

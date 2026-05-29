@@ -1,5 +1,5 @@
 // pages/dashboard.js — no-flash, data-only updates, 30s polling
-import { el, fmtNum, fmtCompact, fmtPct, fmtSigned, timeAgo, fmtTimeIST, CHART_AXIS_STYLE } from '../components.js';
+import { el, fmtNum, fmtCompact, fmtPct, fmtSigned, timeAgo, fmtTimeIST, CHART_AXIS_STYLE, isMarketHourTs, filterMarketHours } from '../components.js';
 import { api } from '../api.js';
 import { store } from '../store.js';
 
@@ -279,7 +279,10 @@ function updateInstrumentCards(data) {
     refs.deltaPcrVal.textContent = pcrChange != null ? fmtNum(pcrChange, 3) : '—';
 
     // Sparkline — update data only, never dispose/recreate
-    const pts = (it.spark?.spot || []).map((v, i) => [it.spark.timestamps[i].replace(/([+-]\d{2}:\d{2})$/, ''), v]);
+    const pts = (it.spark?.spot || [])
+      .map((v, i) => [it.spark.timestamps[i], v])
+      .filter(([ts]) => isMarketHourTs(ts))
+      .map(([ts, v]) => [ts.replace(/([+-]\d{2}:\d{2})$/, ''), v]);
     const col = tone === 'bull' ? '#b1ffc2' : '#ff8a9e';
     if (sparkCharts[it.instrument]) {
       sparkCharts[it.instrument].setOption({ series: [{ data: pts, lineStyle: { color: col }, itemStyle: { color: col }, areaStyle: { color: col, opacity: 0.08 } }] });
@@ -339,7 +342,7 @@ async function updateFeatured() {
         lineStyle: { color: isSpot ? '#ffffff' : '#c6c0ff', width: 1.6 },
         areaStyle: isSpot ? { color: 'rgba(255,255,255,0.03)' } : undefined,
         yAxisIndex: isSpot ? 0 : 1,
-        data: s.points.map(p => [p.timestamp.replace(/([+-]\d{2}:\d{2})$/, ''), p.value]),
+        data: filterMarketHours(s.points).map(p => [p.timestamp.replace(/([+-]\d{2}:\d{2})$/, ''), p.value]),
       };
     });
     featuredChart.setOption({ series }, { replaceMerge: ['series'] });
@@ -392,7 +395,8 @@ function hideError() {
 
 async function _loadOiSeries(instrument, date) {
   const rows = await api.totalOi(instrument, date);
-  return Array.isArray(rows) ? rows : (rows.data || rows.rows || []);
+  const raw = Array.isArray(rows) ? rows : (rows.data || rows.rows || []);
+  return filterMarketHours(raw);
 }
 
 async function fetchLatestOiChanges(instruments) {

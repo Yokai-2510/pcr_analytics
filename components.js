@@ -34,6 +34,25 @@ export function toast(msg, type = 'info', duration = 4000) {
   }, duration);
 }
 
+// ---- Market hours filter ----
+// The backend stores prev_close baselines at 00:00 IST and (depending on
+// the worker schedule) may emit a few rows outside trading hours. The
+// frontend renders only data inside 09:15..15:30 IST so charts and tables
+// don't show a flat pre-market segment. Storage keeps everything.
+export const MARKET_OPEN_HHMM = '09:15';
+export const MARKET_CLOSE_HHMM = '15:30';
+
+export function isMarketHourTs(ts) {
+  if (typeof ts !== 'string' || ts.length < 16) return true;
+  const hm = ts.slice(11, 16);  // "HH:MM" from "YYYY-MM-DDTHH:MM:SS+TZ"
+  return hm >= MARKET_OPEN_HHMM && hm <= MARKET_CLOSE_HHMM;
+}
+
+export function filterMarketHours(arr, key = 'timestamp') {
+  if (!Array.isArray(arr)) return arr;
+  return arr.filter(item => item && isMarketHourTs(item[key]));
+}
+
 // ---- modal ----
 export function modal(content, opts = {}) {
   const close = () => bg.remove();
