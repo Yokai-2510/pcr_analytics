@@ -12,7 +12,7 @@ const DEFAULT_CONFIG = {
   cooldown_minutes: 0,
   instruments: ['nifty'],
   strike_mode: 'atm',
-  custom_strike: null,
+  custom_steps: 0,
   lots: 1,
   exit_on_counter_crossover: true,
   stop_loss_enabled: true,
@@ -203,32 +203,33 @@ function renderInstrumentSection(cfg) {
   const strikeSel = Select({
     options: [
       { value: 'atm', label: 'ATM (at-the-money)' },
-      { value: 'atm_plus_1', label: 'ATM + 1 step (OTM)' },
-      { value: 'atm_minus_1', label: 'ATM − 1 step (ITM)' },
-      { value: 'custom', label: 'Custom strike' },
+      { value: 'itm_1', label: 'ITM −1 step' },
+      { value: 'itm_2', label: 'ITM −2 steps' },
+      { value: 'custom_steps', label: 'Custom (ATM ± N steps)' },
     ],
     value: cfg.strike_mode,
     onChange: (v) => {
       cfg.strike_mode = v;
-      customField.style.display = v === 'custom' ? '' : 'none';
+      customField.style.display = v === 'custom_steps' ? '' : 'none';
     },
   });
 
-  const customStrikeInput = el('input', {
+  const customStepsInput = el('input', {
     type: 'number',
-    value: cfg.custom_strike != null ? String(cfg.custom_strike) : '',
-    placeholder: 'e.g. 25000',
+    step: '1',
+    value: cfg.custom_steps != null ? String(cfg.custom_steps) : '0',
+    placeholder: 'e.g. 2 = 2 steps ITM, −1 = 1 step OTM',
   });
-  customStrikeInput.onchange = () => {
-    const v = parseFloat(customStrikeInput.value);
-    cfg.custom_strike = Number.isFinite(v) ? v : null;
+  customStepsInput.onchange = () => {
+    const v = parseInt(customStepsInput.value, 10);
+    cfg.custom_steps = Number.isFinite(v) ? v : 0;
   };
   const customField = FormField({
-    label: 'Custom strike',
-    input: customStrikeInput,
-    hint: 'Absolute strike price — only applied when one underlying is selected.',
+    label: 'Custom steps from ATM',
+    input: customStepsInput,
+    hint: 'Positive number = ITM (toward spot), negative = OTM (away from spot). Step direction is leg-aware.',
   });
-  customField.style.display = cfg.strike_mode === 'custom' ? '' : 'none';
+  customField.style.display = cfg.strike_mode === 'custom_steps' ? '' : 'none';
 
   const lotsInput = el('input', { type: 'number', min: '1', value: String(cfg.lots) });
   lotsInput.onchange = () => {
