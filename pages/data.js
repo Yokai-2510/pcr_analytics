@@ -16,6 +16,12 @@ function buildSortableTable(cols, rows) {
   function applySort() {
     if (!sortKey || !sortDir) return rows;
     const col = cols.find(c => c.key === sortKey);
+    // Column can override with sortFilter(rows, dir) -> rows. Used for the
+    // Signal / Crossover columns where "sorting" really means "filter the
+    // blanks and keep the rest in chronological order so BUY/SELL alternate".
+    if (typeof col?.sortFilter === 'function') {
+      return col.sortFilter(rows, sortDir);
+    }
     const isNum = col?.num !== false;
     return [...rows].sort((a, b) => {
       let av = a[sortKey];
@@ -501,11 +507,21 @@ export async function mount(container) {
           const tone = r.signedPcr > 0 ? 'bull' : r.signedPcr < 0 ? 'bear' : '';
           return el('td', { class: `mono ${tone}`, style: { fontWeight: '600' } }, (r.signedPcr >= 0 ? '+' : '') + fmtNum(r.signedPcr, 3));
         } },
-        { key: 'signalRank', label: 'Signal', render: r => {
-          const tone = r.signal === 'Strong Bull' || r.signal === 'Bull' ? 'bull'
-                     : r.signal === 'Strong Bear' || r.signal === 'Bear' ? 'bear' : 'neutral';
-          return el('td', {}, el('span', { class: `change-pill ${tone}`, style: { fontSize: '10px' } }, r.signal));
-        } },
+        { key: 'signalRank', label: 'Signal',
+          render: r => {
+            const tone = r.signal === 'Strong Bull' || r.signal === 'Bull' ? 'bull'
+                       : r.signal === 'Strong Bear' || r.signal === 'Bear' ? 'bear' : 'neutral';
+            return el('td', {}, el('span', { class: `change-pill ${tone}`, style: { fontSize: '10px' } }, r.signal));
+          },
+          // Click on Signal to keep only rows that have a directional read
+          // and order them chronologically, so Bull/Bear alternations remain
+          // visible in time order rather than grouping all bulls together.
+          sortFilter: (rs, dir) => rs
+            .filter(r => r.signal !== '—')
+            .sort((a, b) => dir === 'asc'
+              ? String(a.timestamp).localeCompare(String(b.timestamp))
+              : String(b.timestamp).localeCompare(String(a.timestamp))),
+        },
       ];
 
       const t = buildSortableTable(cols, computed);
@@ -618,15 +634,33 @@ export async function mount(container) {
         { key: 'ceCumm', label: 'CE Cumulative', render: r => el('td', { class: `mono ${r.ceCumm >= 0 ? 'bull' : 'bear'}` }, fmtCompact(r.ceCumm)) },
         { key: 'peCumm', label: 'PE Cumulative', render: r => el('td', { class: `mono ${r.peCumm >= 0 ? 'bull' : 'bear'}` }, fmtCompact(r.peCumm)) },
         { key: 'diff', label: 'Difference (PE−CE)', render: r => el('td', { class: `mono ${r.diff >= 0 ? 'bull' : 'bear'}`, style: { fontWeight: '600' } }, (r.diff >= 0 ? '+' : '') + fmtCompact(r.diff)) },
-        { key: 'signalRank', label: 'Signal', render: r => {
-          const tone = r.signal === 'BUY' ? 'bull' : r.signal === 'SELL' ? 'bear' : 'neutral';
-          const label = r.signal || '—';
-          return el('td', {}, el('span', { class: `change-pill ${tone}`, style: { fontSize: '10px' } }, label));
-        } },
-        { key: 'crossover', label: 'Crossover', render: r => el('td', {
-          class: 'mono',
-          style: { fontWeight: r.crossover ? '700' : '400', color: r.crossover ? 'var(--accent)' : 'var(--text-muted)' },
-        }, r.crossover ? 'TRUE' : 'FALSE') },
+        { key: 'signalRank', label: 'Signal',
+          render: r => {
+            const tone = r.signal === 'BUY' ? 'bull' : r.signal === 'SELL' ? 'bear' : 'neutral';
+            const label = r.signal || '—';
+            return el('td', {}, el('span', { class: `change-pill ${tone}`, style: { fontSize: '10px' } }, label));
+          },
+          // Click on Signal to keep only BUY/SELL rows in chronological order
+          // — the data_engine enforces strict alternation so they naturally
+          // come out BUY/SELL/BUY/SELL once the blanks are dropped.
+          sortFilter: (rs, dir) => rs
+            .filter(r => r.signalRank !== 0)
+            .sort((a, b) => dir === 'asc'
+              ? String(a.timestamp).localeCompare(String(b.timestamp))
+              : String(b.timestamp).localeCompare(String(a.timestamp))),
+        },
+        { key: 'crossover', label: 'Crossover',
+          render: r => el('td', {
+            class: 'mono',
+            style: { fontWeight: r.crossover ? '700' : '400', color: r.crossover ? 'var(--accent)' : 'var(--text-muted)' },
+          }, r.crossover ? 'TRUE' : 'FALSE'),
+          // Click on Crossover to keep only TRUE rows, time-ordered.
+          sortFilter: (rs, dir) => rs
+            .filter(r => r.crossover === 1)
+            .sort((a, b) => dir === 'asc'
+              ? String(a.timestamp).localeCompare(String(b.timestamp))
+              : String(b.timestamp).localeCompare(String(a.timestamp))),
+        },
       ];
 
       const t = buildSortableTable(cols, computed);
