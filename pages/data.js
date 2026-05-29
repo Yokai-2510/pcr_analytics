@@ -770,8 +770,66 @@ export async function mount(container) {
   // ENTRY SIGNALS TAB
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   const entrySignalsContent = el('div');
-  buildTabToolbar(entrySignalsPanel, 'entry-signals');
+  buildTabToolbar(entrySignalsPanel, 'entry-signals', (controls) => {
+    const esExportBtn = el('button', { class: 'btn secondary sm', onclick: exportEntrySignalsCSV }, 'Export CSV');
+    controls.append(el('div', { class: 'spacer' }), esExportBtn);
+  });
   entrySignalsPanel.appendChild(entrySignalsContent);
+
+  async function exportEntrySignalsCSV() {
+    const ts = tabState['entry-signals'];
+    if (!ts.instrument || !ts.date) { toast('Select instrument and date first', 'error'); return; }
+    toast('Exporting entry signals…', 'info');
+    try {
+      const data = await api.computedTicks(ts.instrument, ts.date);
+      const rawTicks = Array.isArray(data) ? data : (data.ticks || data.data || data.rows || []);
+      const ticks = filterMarketHours(rawTicks);
+      if (!ticks.length) { toast('No data to export', 'error'); return; }
+      for (let i = 0; i < ticks.length; i++) {
+        const t = ticks[i];
+        if (t.ce_oi_change == null || t.pe_oi_change == null) {
+          const ceCumm = t.ce_oi_cumm_change ?? t.ce_cumulative ?? t.ce_oi_cumm ?? 0;
+          const peCumm = t.pe_oi_cumm_change ?? t.pe_cumulative ?? t.pe_oi_cumm ?? 0;
+          if (i === 0) {
+            if (t.ce_oi_change == null) t.ce_oi_change = ceCumm;
+            if (t.pe_oi_change == null) t.pe_oi_change = peCumm;
+          } else {
+            const prev = ticks[i - 1];
+            const prevCeCumm = prev.ce_oi_cumm_change ?? prev.ce_cumulative ?? prev.ce_oi_cumm ?? 0;
+            const prevPeCumm = prev.pe_oi_cumm_change ?? prev.pe_cumulative ?? prev.pe_oi_cumm ?? 0;
+            if (t.ce_oi_change == null) t.ce_oi_change = ceCumm - prevCeCumm;
+            if (t.pe_oi_change == null) t.pe_oi_change = peCumm - prevPeCumm;
+          }
+        }
+      }
+      const headers = ['Timestamp', 'CE_OI_Change', 'PE_OI_Change', 'CE_Cumulative', 'PE_Cumulative', 'Difference_PE_minus_CE', 'Signal', 'Crossover'];
+      const csvRows = [headers.join(',')];
+      for (const r of ticks) {
+        const ceCumm = r.ce_oi_cumm_change ?? r.ce_cumulative ?? r.ce_oi_cumm ?? 0;
+        const peCumm = r.pe_oi_cumm_change ?? r.pe_cumulative ?? r.pe_oi_cumm ?? 0;
+        const crossover = (r.crossover === true || r.crossover === 1 || r.crossover === 'TRUE' || r.crossover === 'true') ? 'TRUE' : 'FALSE';
+        csvRows.push([
+          r.timestamp,
+          r.ce_oi_change ?? r.ce_oi_chg ?? 0,
+          r.pe_oi_change ?? r.pe_oi_chg ?? 0,
+          ceCumm,
+          peCumm,
+          peCumm - ceCumm,
+          (r.signal || '').toUpperCase() || '',
+          crossover,
+        ].join(','));
+      }
+      const blob = new Blob([csvRows.join('\n')], { type: 'text/csv' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `entry-signals-${ts.instrument}-${ts.date}.csv`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+      toast(`Exported ${ticks.length} rows`, 'success');
+    } catch (e) {
+      toast('Export failed: ' + e.message, 'error');
+    }
+  }
 
   async function renderEntrySignals(silent = false) {
     if (!silent) entrySignalsContent.innerHTML = '<div class="dim" style="padding:24px">Loading entry signals…</div>';
