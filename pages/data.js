@@ -1,4 +1,4 @@
-// pages/data.js — Snapshots data explorer (4-tab: OI Analytics / OI Logs / Entry Signals / All Logs)
+// pages/data.js — Snapshots data explorer (5-tab: OI Analytics / OI Logs / Volume Logs / Entry Signals / All Logs)
 import { el, toast, fmtTimeIST, fmtDateIST, fmtNum, fmtCompact, fmtSigned, fmtPct, icon, Select, DateSelect, filterMarketHours } from '../components.js';
 
 // Reusable client-side sortable table. Each col: { key, label, num, render(row) }.
@@ -86,13 +86,14 @@ let selectedCols = [];
 let filters = [];
 let searchQuery = '';
 let resampleInterval = 'raw';
-let activeTab = 'oi-analytics'; // 'oi-analytics' | 'oi-logs' | 'entry-signals' | 'all-logs'
+let activeTab = 'oi-analytics'; // 'oi-analytics' | 'oi-logs' | 'volume-logs' | 'entry-signals' | 'all-logs'
 let pollTimer = null;
 
 // Per-tab instrument/date state so each tab remembers its own selection
 const tabState = {
   'oi-analytics': { instrument: 'nifty', date: new Date().toISOString().slice(0, 10) },
   'oi-logs':      { instrument: 'nifty', date: new Date().toISOString().slice(0, 10) },
+  'volume-logs':  { instrument: 'nifty', date: new Date().toISOString().slice(0, 10) },
   'entry-signals':   { instrument: 'nifty', date: new Date().toISOString().slice(0, 10) },
   'all-logs':     { instrument: 'nifty', date: new Date().toISOString().slice(0, 10) },
 };
@@ -158,6 +159,7 @@ export async function mount(container) {
   const tabs = [
     { id: 'oi-analytics', label: 'OI Analytics' },
     { id: 'oi-logs', label: 'OI Logs' },
+    { id: 'volume-logs', label: 'Volume Logs' },
     { id: 'entry-signals', label: 'Entry Signals' },
     { id: 'all-logs', label: 'All Logs' },
   ];
@@ -175,11 +177,13 @@ export async function mount(container) {
   // ── Shared refs for content panels ──
   const oiAnalyticsPanel = el('div', { class: 'tab-panel' });
   const oiLogsPanel = el('div', { class: 'tab-panel' });
+  const volumeLogsPanel = el('div', { class: 'tab-panel' });
   const entrySignalsPanel = el('div', { class: 'tab-panel' });
   const allLogsPanel = el('div', { class: 'tab-panel' });
 
   page.appendChild(oiAnalyticsPanel);
   page.appendChild(oiLogsPanel);
+  page.appendChild(volumeLogsPanel);
   page.appendChild(entrySignalsPanel);
   page.appendChild(allLogsPanel);
 
@@ -205,6 +209,7 @@ export async function mount(container) {
         if (tabId === 'all-logs') { state.page = 1; runQuery(); }
         else if (tabId === 'oi-analytics') renderOiAnalytics();
         else if (tabId === 'oi-logs') renderOiLogs();
+        else if (tabId === 'volume-logs') renderVolumeLogs();
         else if (tabId === 'entry-signals') renderEntrySignals();
       },
     });
@@ -217,6 +222,7 @@ export async function mount(container) {
         if (tabId === 'all-logs') { state.page = 1; runQuery(); }
         else if (tabId === 'oi-analytics') renderOiAnalytics();
         else if (tabId === 'oi-logs') renderOiLogs();
+        else if (tabId === 'volume-logs') renderVolumeLogs();
         else if (tabId === 'entry-signals') renderEntrySignals();
       },
       placeholder: 'All dates',
@@ -241,11 +247,13 @@ export async function mount(container) {
     Object.entries(tabEls).forEach(([id, btn]) => btn.classList.toggle('active', id === tabId));
     oiAnalyticsPanel.style.display = tabId === 'oi-analytics' ? '' : 'none';
     oiLogsPanel.style.display = tabId === 'oi-logs' ? '' : 'none';
+    volumeLogsPanel.style.display = tabId === 'volume-logs' ? '' : 'none';
     entrySignalsPanel.style.display = tabId === 'entry-signals' ? '' : 'none';
     allLogsPanel.style.display = tabId === 'all-logs' ? '' : 'none';
     if (tabId === 'all-logs') renderBody();
     else if (tabId === 'oi-analytics') renderOiAnalytics();
     else if (tabId === 'oi-logs') renderOiLogs();
+    else if (tabId === 'volume-logs') renderVolumeLogs();
     else if (tabId === 'entry-signals') renderEntrySignals();
   }
 
@@ -532,6 +540,229 @@ export async function mount(container) {
       oiLogsContent.appendChild(el('div', { class: 'data-grid-wrap' }, t));
     } catch (e) {
       if (!silent) oiLogsContent.innerHTML = `<div class="empty-state"><span class="bear">Failed</span><span class="text-xs mono dim">${e.message}</span></div>`;
+    }
+  }
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // VOLUME LOGS TAB
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  const volumeLogsContent = el('div');
+  buildTabToolbar(volumeLogsPanel, 'volume-logs', (controls) => {
+    const volExportBtn = el('button', { class: 'btn secondary sm', onclick: exportVolumeLogsCSV }, 'Export CSV');
+    controls.append(el('div', { class: 'spacer' }), volExportBtn);
+  });
+  volumeLogsPanel.appendChild(volumeLogsContent);
+
+  async function _fetchVolumeData(instrument, date) {
+    if (!instrument || !date) return null;
+    const raw = await api.totalVolume(instrument, date);
+    const rawRows = Array.isArray(raw) ? raw : (raw.data || raw.rows || []);
+    const rows = filterMarketHours(rawRows);
+    if (!rows.length) return null;
+    const timeMap = new Map();
+    rows.forEach(r => {
+      const ts = r.timestamp || r.time || r.date;
+      if (!ts) return;
+      const existing = timeMap.get(ts);
+      if (existing) {
+        existing.total_ce_volume += (r.total_ce_volume || r.ce_volume || 0);
+        existing.total_pe_volume += (r.total_pe_volume || r.pe_volume || 0);
+      } else {
+        timeMap.set(ts, {
+          timestamp: ts,
+          total_ce_volume: r.total_ce_volume || r.ce_volume || 0,
+          total_pe_volume: r.total_pe_volume || r.pe_volume || 0,
+        });
+      }
+    });
+    const summaryRows = [...timeMap.values()].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+    return { summaryRows };
+  }
+
+  async function exportVolumeLogsCSV() {
+    const ts = tabState['volume-logs'];
+    if (!ts.instrument || !ts.date) { toast('Select instrument and date first', 'error'); return; }
+    toast('Exporting Volume logs…', 'info');
+    try {
+      const data = await _fetchVolumeData(ts.instrument, ts.date);
+      if (!data) { toast('No data to export', 'error'); return; }
+      const { summaryRows } = data;
+      const headers = ['Time', 'CE_Volume', 'PE_Volume', 'VPR', 'Delta_VPR', 'CE_Vol_Change', 'PE_Vol_Change', 'Signed_VPR', 'Signal'];
+      const csvRows = [headers.join(',')];
+      for (let i = 0; i < summaryRows.length; i++) {
+        const r = summaryRows[i];
+        const rowVpr = r.total_pe_volume && r.total_ce_volume ? (r.total_pe_volume / r.total_ce_volume) : 0;
+        const prev = i > 0 ? summaryRows[i - 1] : null;
+        const cΔ = prev ? (r.total_ce_volume - prev.total_ce_volume) : 0;
+        const pΔ = prev ? (r.total_pe_volume - prev.total_pe_volume) : 0;
+        const deltaVpr = (prev && Math.abs(cΔ) > 0) ? (pΔ / cΔ) : 0;
+
+        const absCe = Math.abs(cΔ), absPe = Math.abs(pΔ);
+        let signedVpr = '';
+        let signal = '';
+        if (prev && absCe > 0) {
+          const mag = absPe / absCe;
+          const sign = ((pΔ >= 0 && cΔ >= 0) || (pΔ <= 0 && cΔ <= 0))
+            ? (mag > 1 ? 1 : -1)
+            : (pΔ >= 0 ? 1 : -1);
+          signedVpr = (sign * mag).toFixed(6);
+          const sv = sign * mag;
+          if (sv > 0) signal = sv >= 1 ? 'Strong Bull' : 'Bull';
+          else signal = sv <= -1 ? 'Strong Bear' : 'Bear';
+        }
+
+        csvRows.push([
+          r.timestamp, r.total_ce_volume, r.total_pe_volume,
+          rowVpr.toFixed(6), deltaVpr.toFixed(6), cΔ, pΔ, signedVpr, signal,
+        ].join(','));
+      }
+      const blob = new Blob([csvRows.join('\n')], { type: 'text/csv' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `volume-logs-${ts.instrument}-${ts.date}.csv`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+      toast(`Exported ${summaryRows.length} rows`, 'success');
+    } catch (e) {
+      toast('Export failed: ' + e.message, 'error');
+    }
+  }
+
+  async function renderVolumeLogs(silent = false) {
+    if (!silent) volumeLogsContent.innerHTML = '<div class="dim" style="padding:24px">Loading volume data…</div>';
+    const ts = tabState['volume-logs'];
+    if (!ts.instrument || !ts.date) {
+      volumeLogsContent.innerHTML = '<div class="empty-state">Select a date to view Volume Logs.</div>';
+      return;
+    }
+    try {
+      const data = await _fetchVolumeData(ts.instrument, ts.date);
+      if (!data) { volumeLogsContent.innerHTML = '<div class="empty-state">No volume data for this date.</div>'; return; }
+      const { summaryRows } = data;
+      const rows = [...summaryRows].reverse();
+      const latest = rows[0];
+      const origSorted = [...summaryRows];
+      const prevLatest = origSorted.length > 1 ? origSorted[origSorted.length - 2] : null;
+      const vpr = latest.total_pe_volume && latest.total_ce_volume ? (latest.total_pe_volume / latest.total_ce_volume) : 0;
+      const latestCeChg = prevLatest ? (latest.total_ce_volume - prevLatest.total_ce_volume) : 0;
+      const latestPeChg = prevLatest ? (latest.total_pe_volume - prevLatest.total_pe_volume) : 0;
+      const latestDeltaVpr = (prevLatest && Math.abs(latestCeChg) > 0) ? (latestPeChg / latestCeChg) : 0;
+      let latestSignedVpr = null;
+      if (prevLatest && Math.abs(latestCeChg) > 0) {
+        const mag = Math.abs(latestPeChg) / Math.abs(latestCeChg);
+        const sign = ((latestPeChg >= 0 && latestCeChg >= 0) || (latestPeChg <= 0 && latestCeChg <= 0))
+          ? (mag > 1 ? 1 : -1)
+          : (latestPeChg >= 0 ? 1 : -1);
+        latestSignedVpr = sign * mag;
+      }
+
+      const miniSummary = el('div', { style: { display: 'flex', gap: '16px', marginBottom: '12px', flexWrap: 'wrap' } },
+        el('div', { class: 'card', style: { padding: '12px 16px', flex: '1', minWidth: '120px' } },
+          el('span', { class: 'text-xs muted' }, 'Latest CE Vol'),
+          el('div', { class: 'mono', style: { fontWeight: '700', fontSize: '16px' } }, fmtCompact(latest.total_ce_volume)),
+        ),
+        el('div', { class: 'card', style: { padding: '12px 16px', flex: '1', minWidth: '120px' } },
+          el('span', { class: 'text-xs muted' }, 'Latest PE Vol'),
+          el('div', { class: 'mono', style: { fontWeight: '700', fontSize: '16px' } }, fmtCompact(latest.total_pe_volume)),
+        ),
+        el('div', { class: 'card', style: { padding: '12px 16px', flex: '1', minWidth: '120px' } },
+          el('span', { class: 'text-xs muted' }, 'Volume PCR'),
+          el('div', { class: `mono ${vpr >= 1 ? 'bull' : 'bear'}`, style: { fontWeight: '700', fontSize: '16px' } }, fmtNum(vpr, 3)),
+        ),
+        el('div', { class: 'card', style: { padding: '12px 16px', flex: '1', minWidth: '120px' } },
+          el('span', { class: 'text-xs muted' }, 'Ticks'),
+          el('div', { class: 'mono', style: { fontWeight: '600' } }, String(rows.length)),
+        ),
+      );
+
+      const miniSummary2 = el('div', { style: { display: 'flex', gap: '16px', marginBottom: '16px', flexWrap: 'wrap' } },
+        el('div', { class: 'card', style: { padding: '12px 16px', flex: '1', minWidth: '120px' } },
+          el('span', { class: 'text-xs muted' }, 'CE Vol Change'),
+          el('div', { class: `mono ${latestCeChg >= 0 ? 'bull' : 'bear'}`, style: { fontWeight: '700', fontSize: '16px' } }, (latestCeChg >= 0 ? '+' : '') + fmtCompact(latestCeChg)),
+        ),
+        el('div', { class: 'card', style: { padding: '12px 16px', flex: '1', minWidth: '120px' } },
+          el('span', { class: 'text-xs muted' }, 'PE Vol Change'),
+          el('div', { class: `mono ${latestPeChg >= 0 ? 'bull' : 'bear'}`, style: { fontWeight: '700', fontSize: '16px' } }, (latestPeChg >= 0 ? '+' : '') + fmtCompact(latestPeChg)),
+        ),
+        el('div', { class: 'card', style: { padding: '12px 16px', flex: '1', minWidth: '120px' } },
+          el('span', { class: 'text-xs muted' }, 'Delta VPR'),
+          el('div', { class: `mono ${latestDeltaVpr >= 0 ? 'bull' : 'bear'}`, style: { fontWeight: '700', fontSize: '16px' } }, (latestDeltaVpr >= 0 ? '+' : '') + fmtNum(latestDeltaVpr, 3)),
+        ),
+        el('div', { class: 'card', style: { padding: '12px 16px', flex: '1', minWidth: '120px' } },
+          el('span', { class: 'text-xs muted' }, 'Signed VPR'),
+          el('div', { class: `mono ${latestSignedVpr != null ? (latestSignedVpr >= 0 ? 'bull' : 'bear') : ''}`, style: { fontWeight: '700', fontSize: '16px' } }, latestSignedVpr != null ? ((latestSignedVpr >= 0 ? '+' : '') + fmtNum(latestSignedVpr, 3)) : '—'),
+        ),
+      );
+
+      const computed = rows.map(r => {
+        const oi = origSorted.indexOf(r);
+        const prevRow = oi > 0 ? origSorted[oi - 1] : null;
+        const rowVpr = r.total_pe_volume && r.total_ce_volume ? (r.total_pe_volume / r.total_ce_volume) : 0;
+        const cΔ = prevRow ? (r.total_ce_volume - prevRow.total_ce_volume) : 0;
+        const pΔ = prevRow ? (r.total_pe_volume - prevRow.total_pe_volume) : 0;
+        const deltaVpr = (prevRow && Math.abs(cΔ) > 0) ? (pΔ / cΔ) : 0;
+        let signedVpr = null;
+        let signal = '—';
+        const absCe = Math.abs(cΔ), absPe = Math.abs(pΔ);
+        if (prevRow && absCe > 0) {
+          const mag = absPe / absCe;
+          const sign = ((pΔ >= 0 && cΔ >= 0) || (pΔ <= 0 && cΔ <= 0))
+            ? (mag > 1 ? 1 : -1)
+            : (pΔ >= 0 ? 1 : -1);
+          signedVpr = sign * mag;
+          signal = signedVpr > 0
+            ? (signedVpr >= 1 ? 'Strong Bull' : 'Bull')
+            : (signedVpr <= -1 ? 'Strong Bear' : 'Bear');
+        }
+        return {
+          timestamp: r.timestamp,
+          ceVol: r.total_ce_volume,
+          peVol: r.total_pe_volume,
+          vpr: rowVpr,
+          deltaVpr,
+          cΔ,
+          pΔ,
+          signedVpr,
+          signal,
+          signalRank: { 'Strong Bull': 2, 'Bull': 1, '—': 0, 'Bear': -1, 'Strong Bear': -2 }[signal] ?? 0,
+        };
+      });
+
+      const cols = [
+        { key: 'timestamp', label: 'Time', render: r => el('td', { class: 'mono' }, fmtTimeIST(r.timestamp)) },
+        { key: 'ceVol', label: 'CE Vol', render: r => el('td', { class: 'mono' }, fmtCompact(r.ceVol)) },
+        { key: 'peVol', label: 'PE Vol', render: r => el('td', { class: 'mono' }, fmtCompact(r.peVol)) },
+        { key: 'vpr', label: 'VPR', render: r => el('td', { class: `mono ${r.vpr >= 1 ? 'bull' : 'bear'}` }, fmtNum(r.vpr, 3)) },
+        { key: 'deltaVpr', label: 'ΔVPR', render: r => el('td', { class: `mono ${r.deltaVpr >= 0 ? 'bull' : 'bear'}` }, (r.deltaVpr >= 0 ? '+' : '') + fmtNum(r.deltaVpr, 3)) },
+        { key: 'cΔ', label: 'CE Δ', render: r => el('td', { class: `mono ${r.cΔ >= 0 ? 'bull' : 'bear'}` }, (r.cΔ >= 0 ? '+' : '') + fmtCompact(r.cΔ)) },
+        { key: 'pΔ', label: 'PE Δ', render: r => el('td', { class: `mono ${r.pΔ >= 0 ? 'bull' : 'bear'}` }, (r.pΔ >= 0 ? '+' : '') + fmtCompact(r.pΔ)) },
+        { key: 'signedVpr', label: 'Signed VPR', render: r => {
+          if (r.signedVpr == null) return el('td', { class: 'mono dim' }, '—');
+          const tone = r.signedVpr > 0 ? 'bull' : r.signedVpr < 0 ? 'bear' : '';
+          return el('td', { class: `mono ${tone}`, style: { fontWeight: '600' } }, (r.signedVpr >= 0 ? '+' : '') + fmtNum(r.signedVpr, 3));
+        } },
+        { key: 'signalRank', label: 'Signal',
+          render: r => {
+            const tone = r.signal === 'Strong Bull' || r.signal === 'Bull' ? 'bull'
+                       : r.signal === 'Strong Bear' || r.signal === 'Bear' ? 'bear' : 'neutral';
+            return el('td', {}, el('span', { class: `change-pill ${tone}`, style: { fontSize: '10px' } }, r.signal));
+          },
+          sortFilter: (rs, dir) => rs
+            .filter(r => r.signal !== '—')
+            .sort((a, b) => dir === 'asc'
+              ? String(a.timestamp).localeCompare(String(b.timestamp))
+              : String(b.timestamp).localeCompare(String(a.timestamp))),
+        },
+      ];
+
+      const t = buildSortableTable(cols, computed);
+
+      volumeLogsContent.innerHTML = '';
+      volumeLogsContent.appendChild(miniSummary);
+      volumeLogsContent.appendChild(miniSummary2);
+      volumeLogsContent.appendChild(el('div', { class: 'data-grid-wrap' }, t));
+    } catch (e) {
+      if (!silent) volumeLogsContent.innerHTML = `<div class="empty-state"><span class="bear">Failed</span><span class="text-xs mono dim">${e.message}</span></div>`;
     }
   }
 
@@ -1046,6 +1277,7 @@ export async function mount(container) {
     if (activeTab === 'all-logs') runQuery(true);
     else if (activeTab === 'oi-analytics') renderOiAnalytics(true);
     else if (activeTab === 'oi-logs') renderOiLogs(true);
+    else if (activeTab === 'volume-logs') renderVolumeLogs(true);
     else if (activeTab === 'entry-signals') renderEntrySignals(true);
   }, 60000);
 }

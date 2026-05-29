@@ -54,6 +54,7 @@ export const api = {
   snapshots: (ins, params = '') => fetchJson(`/api/snapshots/${ins}${params}`),
   pcr: (ins) => fetchJson(`/api/pcr/${ins}`),
   totalOi: (ins, date) => fetchJson(`/api/total-oi/${ins}${date ? `?date=${date}` : ''}`),
+  totalVolume: (ins, date) => fetchJson(`/api/total-volume/${ins}${date ? `?date=${date}` : ''}`),
   oiChange: (ins) => fetchJson(`/api/oi-change/${ins}`),
   history: (ins = '') => fetchJson(ins ? `/api/history/${ins}` : '/api/history'),
 
