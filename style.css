@@ -70,45 +70,24 @@ button, input, select, textarea { font: inherit; color: inherit; }
 ::-webkit-scrollbar-corner { background: transparent; }
 * { scrollbar-color: rgba(255,255,255,0.22) rgba(255,255,255,0.035); scrollbar-width: thin; }
 
-/* ---- Floating scroll-to-top / scroll-to-bottom controls ---- */
-.scroll-controls {
-  position: fixed;
-  bottom: 22px;
-  right: 22px;
-  z-index: 200;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  opacity: 0;
-  transform: translateY(8px);
-  pointer-events: none;
-  transition: opacity 200ms var(--ease), transform 200ms var(--ease);
-}
-.scroll-controls.visible { opacity: 1; transform: translateY(0); pointer-events: auto; }
-.scroll-controls button {
-  width: 38px;
-  height: 38px;
-  border-radius: 50%;
-  background: rgba(18,18,26,0.85);
-  backdrop-filter: blur(14px) saturate(160%);
-  -webkit-backdrop-filter: blur(14px) saturate(160%);
-  border: 1px solid var(--border);
-  color: var(--text-muted);
+/* ---- Sortable table column headers ---- */
+.sort-th {
   cursor: pointer;
-  font-size: 14px;
-  font-weight: 600;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: all 180ms var(--ease);
-  box-shadow: 0 4px 16px rgba(0,0,0,0.35);
+  user-select: none;
+  transition: color 140ms var(--ease);
 }
-.scroll-controls button:hover {
-  background: rgba(35,35,45,0.92);
-  color: var(--text);
-  border-color: var(--border-strong);
-  transform: translateY(-1px);
+.sort-th:hover { color: var(--text); }
+.sort-th .sort-icon {
+  display: inline-block;
+  margin-left: 6px;
+  font-size: 9px;
+  color: var(--text-dim);
+  letter-spacing: -1px;
+  font-family: var(--mono);
+  vertical-align: middle;
 }
+.sort-th.active .sort-icon { color: var(--accent); }
+.sort-th.active { color: var(--text); }
 
 /* ---- Disabled button affordance ---- */
 .btn:disabled, .btn[disabled] {

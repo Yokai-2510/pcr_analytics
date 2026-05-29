@@ -1,5 +1,76 @@
 // pages/data.js — Snapshots data explorer (4-tab: OI Analytics / OI Logs / Entry Signals / All Logs)
 import { el, toast, fmtTimeIST, fmtDateIST, fmtNum, fmtCompact, fmtSigned, fmtPct, icon, Select, DateSelect } from '../components.js';
+
+// Reusable client-side sortable table. Each col: { key, label, num, render(row) }.
+// Click cycles asc -> desc -> none. Numeric sort by default; pass num:false for
+// string. The render fn returns the cell node for a row given the col key.
+function buildSortableTable(cols, rows) {
+  const table = el('table', { class: 'data' });
+  const thead = el('thead');
+  const hr = el('tr');
+  const tbody = el('tbody');
+  let sortKey = null;
+  let sortDir = null;
+  const iconEls = {};
+
+  function applySort() {
+    if (!sortKey || !sortDir) return rows;
+    const col = cols.find(c => c.key === sortKey);
+    const isNum = col?.num !== false;
+    return [...rows].sort((a, b) => {
+      let av = a[sortKey];
+      let bv = b[sortKey];
+      if (isNum) {
+        av = (av == null || Number.isNaN(Number(av))) ? -Infinity : Number(av);
+        bv = (bv == null || Number.isNaN(Number(bv))) ? -Infinity : Number(bv);
+        return sortDir === 'asc' ? av - bv : bv - av;
+      }
+      const cmp = String(av ?? '').localeCompare(String(bv ?? ''));
+      return sortDir === 'asc' ? cmp : -cmp;
+    });
+  }
+
+  function paintHeaders() {
+    cols.forEach(c => {
+      const active = sortKey === c.key;
+      iconEls[c.key].parentNode.classList.toggle('active', active);
+      iconEls[c.key].textContent = active ? (sortDir === 'asc' ? '▲' : '▼') : '↕';
+    });
+  }
+
+  function renderRows() {
+    tbody.innerHTML = '';
+    applySort().forEach(row => {
+      const tr = el('tr');
+      cols.forEach(c => tr.appendChild(c.render(row)));
+      tbody.appendChild(tr);
+    });
+  }
+
+  cols.forEach(c => {
+    const ic = el('span', { class: 'sort-icon' }, '↕');
+    iconEls[c.key] = ic;
+    const th = el('th', { class: 'sort-th', title: 'Click to sort' }, c.label, ic);
+    th.addEventListener('click', () => {
+      if (sortKey === c.key) {
+        sortDir = sortDir === 'asc' ? 'desc' : sortDir === 'desc' ? null : 'asc';
+        if (sortDir === null) sortKey = null;
+      } else {
+        sortKey = c.key;
+        sortDir = 'desc';
+      }
+      paintHeaders();
+      renderRows();
+    });
+    hr.appendChild(th);
+  });
+  thead.appendChild(hr);
+  table.appendChild(thead);
+  table.appendChild(tbody);
+  paintHeaders();
+  renderRows();
+  return table;
+}
 import { api } from '../api.js';
 import { store } from '../store.js';
 
@@ -379,78 +450,65 @@ export async function mount(container) {
         ),
       );
 
-      // ── Time-series table (latest at top) ──
-      const t = el('table', { class: 'data' });
-      const cols = ['Time', 'CE OI', 'PE OI', 'PCR', 'ΔPCR', 'CE Δ', 'PE Δ', 'Signed PCR', 'Signal'];
-      const thead = el('thead');
-      const hr = el('tr');
-      cols.forEach(c => hr.appendChild(el('th', {}, c)));
-      thead.appendChild(hr);
-      t.appendChild(thead);
-
-      const tbody = el('tbody');
-      // Walk rows top-down (latest first), compute deltas against previous row
-      const origIdx = (r) => origSorted.indexOf(r);
-
-      rows.forEach((r, displayIdx) => {
-        const oi = origIdx(r);
-        const rowPcr = r.total_pe_oi && r.total_ce_oi ? (r.total_pe_oi / r.total_ce_oi) : 0;
+      // ── Pre-compute every row's display values in time-order (so deltas
+      // are deterministic and sort doesn't break the chronology math) ──
+      const computed = rows.map(r => {
+        const oi = origSorted.indexOf(r);
         const prevRow = oi > 0 ? origSorted[oi - 1] : null;
-        const prevPcr = prevRow ? (prevRow.total_pe_oi / prevRow.total_ce_oi) : rowPcr;
-        const prevCe = prevRow ? prevRow.total_ce_oi : r.total_ce_oi;
-        const prevPe = prevRow ? prevRow.total_pe_oi : r.total_pe_oi;
-        const cΔ = r.total_ce_oi - prevCe;
-        const pΔ = r.total_pe_oi - prevPe;
-        // ΔPCR = PE ΔOI / CE ΔOI (ratio of OI changes, not PCR difference)
+        const rowPcr = r.total_pe_oi && r.total_ce_oi ? (r.total_pe_oi / r.total_ce_oi) : 0;
+        const cΔ = prevRow ? (r.total_ce_oi - prevRow.total_ce_oi) : 0;
+        const pΔ = prevRow ? (r.total_pe_oi - prevRow.total_pe_oi) : 0;
         const deltaPcr = (prevRow && Math.abs(cΔ) > 0) ? (pΔ / cΔ) : 0;
 
         // ── Signed PCR (Dr. Vijay Bhilwade methodology) ──
-        // PCR = |PE ΔOI| / |CE ΔOI|
-        // Sign: same-sign → + if PCR>1 else -; diff-sign → sign of PE ΔOI
-        const absCe = Math.abs(cΔ);
-        const absPe = Math.abs(pΔ);
         let signedPcr = null;
         let signal = '—';
+        const absCe = Math.abs(cΔ), absPe = Math.abs(pΔ);
         if (prevRow && absCe > 0) {
           const pcrMag = absPe / absCe;
-          let sign;
-          if ((pΔ >= 0 && cΔ >= 0) || (pΔ <= 0 && cΔ <= 0)) {
-            // Same direction: compare relative strength
-            sign = pcrMag > 1 ? 1 : -1;
-          } else {
-            // Opposite direction: sign follows PE ΔOI
-            sign = pΔ >= 0 ? 1 : -1;
-          }
+          const sign = ((pΔ >= 0 && cΔ >= 0) || (pΔ <= 0 && cΔ <= 0))
+            ? (pcrMag > 1 ? 1 : -1)
+            : (pΔ >= 0 ? 1 : -1);
           signedPcr = sign * pcrMag;
-          if (signedPcr > 0) {
-            signal = signedPcr >= 1 ? 'Strong Bull' : 'Bull';
-          } else {
-            signal = signedPcr <= -1 ? 'Strong Bear' : 'Bear';
-          }
+          signal = signedPcr > 0
+            ? (signedPcr >= 1 ? 'Strong Bull' : 'Bull')
+            : (signedPcr <= -1 ? 'Strong Bear' : 'Bear');
         }
-
-        const tr = el('tr');
-        tr.appendChild(el('td', { class: 'mono' }, fmtTimeIST(r.timestamp)));
-        tr.appendChild(el('td', { class: 'mono' }, fmtCompact(r.total_ce_oi)));
-        tr.appendChild(el('td', { class: 'mono' }, fmtCompact(r.total_pe_oi)));
-        tr.appendChild(el('td', { class: `mono ${rowPcr >= 1 ? 'bull' : 'bear'}` }, fmtNum(rowPcr, 3)));
-        tr.appendChild(el('td', { class: `mono ${deltaPcr >= 0 ? 'bull' : 'bear'}` }, (deltaPcr >= 0 ? '+' : '') + fmtNum(deltaPcr, 3)));
-        tr.appendChild(el('td', { class: `mono ${cΔ >= 0 ? 'bull' : 'bear'}` }, (cΔ >= 0 ? '+' : '') + fmtCompact(cΔ)));
-        tr.appendChild(el('td', { class: `mono ${pΔ >= 0 ? 'bull' : 'bear'}` }, (pΔ >= 0 ? '+' : '') + fmtCompact(pΔ)));
-        // Signed PCR
-        if (signedPcr != null) {
-          const spcrTone = signedPcr > 0 ? 'bull' : signedPcr < 0 ? 'bear' : '';
-          tr.appendChild(el('td', { class: `mono ${spcrTone}`, style: { fontWeight: '600' } }, (signedPcr >= 0 ? '+' : '') + fmtNum(signedPcr, 3)));
-        } else {
-          tr.appendChild(el('td', { class: 'mono dim' }, '—'));
-        }
-        // Signal
-        const sigTone = signal.startsWith('Strong Bull') ? 'bull' : signal === 'Bull' ? 'bull' : signal.startsWith('Strong Bear') ? 'bear' : signal === 'Bear' ? 'bear' : '';
-        const sigClass = sigTone === 'bull' ? 'change-pill bull' : sigTone === 'bear' ? 'change-pill bear' : 'change-pill neutral';
-        tr.appendChild(el('td', {}, el('span', { class: sigClass, style: { fontSize: '10px' } }, signal)));
-        tbody.appendChild(tr);
+        return {
+          timestamp: r.timestamp,
+          ceOi: r.total_ce_oi,
+          peOi: r.total_pe_oi,
+          pcr: rowPcr,
+          deltaPcr,
+          cΔ,
+          pΔ,
+          signedPcr,
+          signal,
+          signalRank: { 'Strong Bull': 2, 'Bull': 1, '—': 0, 'Bear': -1, 'Strong Bear': -2 }[signal] ?? 0,
+        };
       });
-      t.appendChild(tbody);
+
+      const cols = [
+        { key: 'timestamp', label: 'Time', render: r => el('td', { class: 'mono' }, fmtTimeIST(r.timestamp)) },
+        { key: 'ceOi', label: 'CE OI', render: r => el('td', { class: 'mono' }, fmtCompact(r.ceOi)) },
+        { key: 'peOi', label: 'PE OI', render: r => el('td', { class: 'mono' }, fmtCompact(r.peOi)) },
+        { key: 'pcr', label: 'PCR', render: r => el('td', { class: `mono ${r.pcr >= 1 ? 'bull' : 'bear'}` }, fmtNum(r.pcr, 3)) },
+        { key: 'deltaPcr', label: 'ΔPCR', render: r => el('td', { class: `mono ${r.deltaPcr >= 0 ? 'bull' : 'bear'}` }, (r.deltaPcr >= 0 ? '+' : '') + fmtNum(r.deltaPcr, 3)) },
+        { key: 'cΔ', label: 'CE Δ', render: r => el('td', { class: `mono ${r.cΔ >= 0 ? 'bull' : 'bear'}` }, (r.cΔ >= 0 ? '+' : '') + fmtCompact(r.cΔ)) },
+        { key: 'pΔ', label: 'PE Δ', render: r => el('td', { class: `mono ${r.pΔ >= 0 ? 'bull' : 'bear'}` }, (r.pΔ >= 0 ? '+' : '') + fmtCompact(r.pΔ)) },
+        { key: 'signedPcr', label: 'Signed PCR', render: r => {
+          if (r.signedPcr == null) return el('td', { class: 'mono dim' }, '—');
+          const tone = r.signedPcr > 0 ? 'bull' : r.signedPcr < 0 ? 'bear' : '';
+          return el('td', { class: `mono ${tone}`, style: { fontWeight: '600' } }, (r.signedPcr >= 0 ? '+' : '') + fmtNum(r.signedPcr, 3));
+        } },
+        { key: 'signalRank', label: 'Signal', render: r => {
+          const tone = r.signal === 'Strong Bull' || r.signal === 'Bull' ? 'bull'
+                     : r.signal === 'Strong Bear' || r.signal === 'Bear' ? 'bear' : 'neutral';
+          return el('td', {}, el('span', { class: `change-pill ${tone}`, style: { fontSize: '10px' } }, r.signal));
+        } },
+      ];
+
+      const t = buildSortableTable(cols, computed);
 
       oiLogsContent.innerHTML = '';
       oiLogsContent.appendChild(miniSummary);
@@ -534,46 +592,44 @@ export async function mount(container) {
       );
       entrySignalsContent.appendChild(summaryStrip);
 
-      // Table
-      const t = el('table', { class: 'data' });
-      const cols = ['Timestamp', 'CE OI Change', 'PE OI Change', 'CE Cumulative', 'PE Cumulative', 'Difference (PE-CE)', 'Signal', 'Crossover'];
-      const thead = el('thead');
-      const hr = el('tr');
-      cols.forEach(c => hr.appendChild(el('th', {}, c)));
-      thead.appendChild(hr);
-      t.appendChild(thead);
-
-      const tbody = el('tbody');
-      rows.forEach(r => {
-        const tr = el('tr');
-        // Timestamp
-        tr.appendChild(el('td', { class: 'mono' }, fmtTimeIST(r.timestamp)));
-        // CE OI Change
-        const ceChg = r.ce_oi_change ?? r.ce_oi_chg ?? 0;
-        tr.appendChild(el('td', { class: `mono ${ceChg >= 0 ? 'bull' : 'bear'}` }, fmtCompact(ceChg)));
-        // PE OI Change
-        const peChg = r.pe_oi_change ?? r.pe_oi_chg ?? 0;
-        tr.appendChild(el('td', { class: `mono ${peChg >= 0 ? 'bull' : 'bear'}` }, fmtCompact(peChg)));
-        // CE Cumulative
+      // Pre-compute display values so sorting is just (re)arranging an array.
+      const computed = rows.map(r => {
         const ceCumm = r.ce_oi_cumm_change ?? r.ce_cumulative ?? r.ce_oi_cumm ?? 0;
-        tr.appendChild(el('td', { class: `mono ${ceCumm >= 0 ? 'bull' : 'bear'}` }, fmtCompact(ceCumm)));
-        // PE Cumulative
         const peCumm = r.pe_oi_cumm_change ?? r.pe_cumulative ?? r.pe_oi_cumm ?? 0;
-        tr.appendChild(el('td', { class: `mono ${peCumm >= 0 ? 'bull' : 'bear'}` }, fmtCompact(peCumm)));
-        // Difference (PE - CE)
-        const diff = peCumm - ceCumm;
-        tr.appendChild(el('td', { class: `mono ${diff >= 0 ? 'bull' : 'bear'}`, style: { fontWeight: '600' } }, (diff >= 0 ? '+' : '') + fmtCompact(diff)));
-        // Signal (colored pill)
-        const signal = (r.signal || '').toUpperCase();
-        const sigTone = signal === 'BUY' ? 'bull' : signal === 'SELL' ? 'bear' : 'neutral';
-        const sigLabel = signal === 'BUY' ? 'BUY' : signal === 'SELL' ? 'SELL' : signal || '—';
-        tr.appendChild(el('td', {}, el('span', { class: `change-pill ${sigTone}`, style: { fontSize: '10px' } }, sigLabel)));
-        // Crossover
         const crossover = r.crossover === true || r.crossover === 1 || r.crossover === 'TRUE' || r.crossover === 'true';
-        tr.appendChild(el('td', { class: 'mono', style: { fontWeight: crossover ? '700' : '400', color: crossover ? 'var(--accent)' : 'var(--text-muted)' } }, crossover ? 'TRUE' : 'FALSE'));
-        tbody.appendChild(tr);
+        const signal = (r.signal || '').toUpperCase();
+        return {
+          timestamp: r.timestamp,
+          ceChg: r.ce_oi_change ?? r.ce_oi_chg ?? 0,
+          peChg: r.pe_oi_change ?? r.pe_oi_chg ?? 0,
+          ceCumm,
+          peCumm,
+          diff: peCumm - ceCumm,
+          signal,
+          signalRank: signal === 'BUY' ? 1 : signal === 'SELL' ? -1 : 0,
+          crossover: crossover ? 1 : 0,
+        };
       });
-      t.appendChild(tbody);
+
+      const cols = [
+        { key: 'timestamp', label: 'Timestamp', render: r => el('td', { class: 'mono' }, fmtTimeIST(r.timestamp)) },
+        { key: 'ceChg', label: 'CE OI Change', render: r => el('td', { class: `mono ${r.ceChg >= 0 ? 'bull' : 'bear'}` }, fmtCompact(r.ceChg)) },
+        { key: 'peChg', label: 'PE OI Change', render: r => el('td', { class: `mono ${r.peChg >= 0 ? 'bull' : 'bear'}` }, fmtCompact(r.peChg)) },
+        { key: 'ceCumm', label: 'CE Cumulative', render: r => el('td', { class: `mono ${r.ceCumm >= 0 ? 'bull' : 'bear'}` }, fmtCompact(r.ceCumm)) },
+        { key: 'peCumm', label: 'PE Cumulative', render: r => el('td', { class: `mono ${r.peCumm >= 0 ? 'bull' : 'bear'}` }, fmtCompact(r.peCumm)) },
+        { key: 'diff', label: 'Difference (PE−CE)', render: r => el('td', { class: `mono ${r.diff >= 0 ? 'bull' : 'bear'}`, style: { fontWeight: '600' } }, (r.diff >= 0 ? '+' : '') + fmtCompact(r.diff)) },
+        { key: 'signalRank', label: 'Signal', render: r => {
+          const tone = r.signal === 'BUY' ? 'bull' : r.signal === 'SELL' ? 'bear' : 'neutral';
+          const label = r.signal || '—';
+          return el('td', {}, el('span', { class: `change-pill ${tone}`, style: { fontSize: '10px' } }, label));
+        } },
+        { key: 'crossover', label: 'Crossover', render: r => el('td', {
+          class: 'mono',
+          style: { fontWeight: r.crossover ? '700' : '400', color: r.crossover ? 'var(--accent)' : 'var(--text-muted)' },
+        }, r.crossover ? 'TRUE' : 'FALSE') },
+      ];
+
+      const t = buildSortableTable(cols, computed);
       entrySignalsContent.appendChild(el('div', { class: 'data-grid-wrap' }, t));
 
     } catch (e) {
