@@ -52,10 +52,70 @@ html, body {
 
 button, input, select, textarea { font: inherit; color: inherit; }
 
-::-webkit-scrollbar { width: 10px; height: 10px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.06); border-radius: 999px; }
-::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.12); }
+::-webkit-scrollbar { width: 12px; height: 12px; }
+::-webkit-scrollbar-track {
+  background: rgba(255,255,255,0.035);
+  border-radius: 999px;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,0.22);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255,255,255,0.36);
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-corner { background: transparent; }
+* { scrollbar-color: rgba(255,255,255,0.22) rgba(255,255,255,0.035); scrollbar-width: thin; }
+
+/* ---- Floating scroll-to-top / scroll-to-bottom controls ---- */
+.scroll-controls {
+  position: fixed;
+  bottom: 22px;
+  right: 22px;
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  opacity: 0;
+  transform: translateY(8px);
+  pointer-events: none;
+  transition: opacity 200ms var(--ease), transform 200ms var(--ease);
+}
+.scroll-controls.visible { opacity: 1; transform: translateY(0); pointer-events: auto; }
+.scroll-controls button {
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  background: rgba(18,18,26,0.85);
+  backdrop-filter: blur(14px) saturate(160%);
+  -webkit-backdrop-filter: blur(14px) saturate(160%);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 180ms var(--ease);
+  box-shadow: 0 4px 16px rgba(0,0,0,0.35);
+}
+.scroll-controls button:hover {
+  background: rgba(35,35,45,0.92);
+  color: var(--text);
+  border-color: var(--border-strong);
+  transform: translateY(-1px);
+}
+
+/* ---- Disabled button affordance ---- */
+.btn:disabled, .btn[disabled] {
+  opacity: 0.4;
+  cursor: not-allowed;
+  pointer-events: none;
+}
 
 /* ---- Topbar ---- */
 .topbar {

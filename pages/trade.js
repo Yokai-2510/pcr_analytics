@@ -97,9 +97,65 @@ function _stopPoll() {
 // ──────────────────────────────────────────────────────────────────────
 
 async function renderConfigs(root) {
-  const cfg = await loadConfig();
+  const loaded = await loadConfig();
 
-  root.appendChild(renderSaveBar(cfg, root));
+  // Track whether the config differs from the last-saved version so the
+  // Save button stays greyed until the user actually changes something.
+  let baselineJson = JSON.stringify(loaded);
+  let dirty = false;
+  const resetBtn = el('button', { class: 'btn ghost sm' }, 'Reset');
+  const saveBtn = el('button', { class: 'btn primary sm' }, 'Save');
+  saveBtn.disabled = true;
+
+  function syncButtons() { saveBtn.disabled = !dirty; }
+
+  // Proxy the config so any field assignment automatically re-checks
+  // dirty-ness — works with every onChange that does `cfg.x = y`.
+  const cfg = new Proxy({ ...loaded }, {
+    set(target, key, value) {
+      target[key] = value;
+      dirty = JSON.stringify(target) !== baselineJson;
+      syncButtons();
+      return true;
+    },
+  });
+
+  resetBtn.onclick = async () => {
+    if (!confirm('Reset all trade configs to defaults?')) return;
+    try { await saveConfig({ ...DEFAULT_CONFIG }); }
+    catch (e) { toast('Reset failed: ' + e.message, 'error'); return; }
+    root.innerHTML = '';
+    await renderConfigs(root);
+    toast('Reset to defaults', 'info');
+  };
+
+  saveBtn.onclick = async () => {
+    if (!dirty) return;
+    try {
+      await saveConfig({ ...cfg });
+      baselineJson = JSON.stringify({ ...cfg });
+      dirty = false;
+      syncButtons();
+      toast('Trade configs saved', 'success');
+    } catch (e) {
+      toast('Save failed: ' + (e.message || 'unknown'), 'error');
+    }
+  };
+
+  const saveBar = el('div', {
+    class: 'card form-section',
+    style: {
+      display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+      gap: '12px', position: 'sticky', top: '64px', zIndex: '40',
+    },
+  },
+    el('div', { class: 'text-xs muted' },
+      'Saved to the backend. The engine re-reads the active config on every tick — changes apply within ~1 second.',
+    ),
+    el('div', { class: 'row gap-8' }, resetBtn, saveBtn),
+  );
+
+  root.appendChild(saveBar);
   root.appendChild(renderEntrySection(cfg));
   root.appendChild(renderInstrumentSection(cfg));
   root.appendChild(renderExitSection(cfg));

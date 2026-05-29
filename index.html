@@ -28,11 +28,35 @@
       topbarRoot.style.display = '';
       pageContainer.style.display = '';
       mountTopbar(topbarRoot);
+      mountScrollControls();
       route();
       window.addEventListener('hashchange', route);
       pollStatus();
       setInterval(pollStatus, 10000);
       loadPrefs();
+    }
+
+    function mountScrollControls() {
+      if (document.querySelector('.scroll-controls')) return;
+      const wrap = el('div', { class: 'scroll-controls' });
+      const up = el('button', { title: 'Scroll to top', 'aria-label': 'Scroll to top' }, '▲');
+      const down = el('button', { title: 'Scroll to bottom', 'aria-label': 'Scroll to bottom' }, '▼');
+      up.addEventListener('click', () => window.scrollTo({ top: 0, behavior: 'smooth' }));
+      down.addEventListener('click', () => window.scrollTo({
+        top: document.documentElement.scrollHeight, behavior: 'smooth',
+      }));
+      wrap.appendChild(up); wrap.appendChild(down);
+      document.body.appendChild(wrap);
+
+      function update() {
+        const scrollable = document.documentElement.scrollHeight > window.innerHeight + 80;
+        wrap.classList.toggle('visible', scrollable);
+      }
+      window.addEventListener('scroll', update, { passive: true });
+      window.addEventListener('resize', update);
+      const observer = new MutationObserver(update);
+      observer.observe(pageContainer, { childList: true, subtree: true });
+      update();
     }
 
     async function loadPrefs() {
