@@ -579,6 +579,60 @@ export async function mount(container) {
     return { summaryRows };
   }
 
+  // Trend strength buckets derived from |ROC of Vol Diff|:
+  //   <5 Weak, 5–20 Moderate, 20–50 Strong, ≥50 Very Strong.
+  function _classifyTrend(absRoc) {
+    if (absRoc == null || !Number.isFinite(absRoc)) return 'Neutral';
+    if (absRoc < 5) return 'Weak';
+    if (absRoc < 20) return 'Moderate';
+    if (absRoc < 50) return 'Strong';
+    return 'Very Strong';
+  }
+  function _classifyAlert(trend, roc) {
+    if (trend !== 'Strong' && trend !== 'Very Strong') return 'NEUTRAL';
+    if (roc == null || !Number.isFinite(roc)) return 'NEUTRAL';
+    return roc < 0 ? 'STRONG CE' : 'STRONG PE';
+  }
+  function _classifyConfidence(trend) {
+    return (trend === 'Strong' || trend === 'Very Strong') ? 'High' : 'Low';
+  }
+
+  // Build the per-row institutional volume metrics in ascending time order.
+  // The backend's total_ce_volume / total_pe_volume are the per-minute
+  // volumes summed across strikes (the broker reports per-tick volume per
+  // strike, not running totals). Cumulative is summed in JS from market open.
+  function _computeVolumeMetrics(summaryRows) {
+    const out = [];
+    let ceCum = 0, peCum = 0;
+    let prevVolDiff = null;
+    for (let i = 0; i < summaryRows.length; i++) {
+      const r = summaryRows[i];
+      const ceVol = r.total_ce_volume || 0;
+      const peVol = r.total_pe_volume || 0;
+      ceCum += ceVol;
+      peCum += peVol;
+      const volDiff = peCum - ceCum;
+      let roc = null;
+      if (prevVolDiff !== null && Math.abs(prevVolDiff) > 0) {
+        roc = (volDiff - prevVolDiff) / Math.abs(prevVolDiff) * 100;
+      }
+      let crossover = '';
+      if (prevVolDiff !== null) {
+        if (prevVolDiff < 0 && volDiff >= 0) crossover = 'PE Cross Up';
+        else if (prevVolDiff > 0 && volDiff <= 0) crossover = 'CE Cross Up';
+      }
+      const trend = _classifyTrend(roc == null ? null : Math.abs(roc));
+      const alert = _classifyAlert(trend, roc);
+      const confidence = _classifyConfidence(trend);
+      out.push({
+        timestamp: r.timestamp,
+        ceVol, peVol, ceCum, peCum, volDiff, roc, crossover, trend, alert, confidence,
+      });
+      prevVolDiff = volDiff;
+    }
+    return out;
+  }
+
   async function exportVolumeLogsCSV() {
     const ts = tabState['volume-logs'];
     if (!ts.instrument || !ts.date) { toast('Select instrument and date first', 'error'); return; }
@@ -586,34 +640,18 @@ export async function mount(container) {
     try {
       const data = await _fetchVolumeData(ts.instrument, ts.date);
       if (!data) { toast('No data to export', 'error'); return; }
-      const { summaryRows } = data;
-      const headers = ['Time', 'CE_Volume', 'PE_Volume', 'VPR', 'Delta_VPR', 'CE_Vol_Change', 'PE_Vol_Change', 'Signed_VPR', 'Signal'];
+      const metrics = _computeVolumeMetrics(data.summaryRows);
+      const headers = [
+        'Time', 'CE_Volume', 'PE_Volume', 'CE_Volume_Cumulative', 'PE_Volume_Cumulative',
+        'Volume_Difference_PE_minus_CE', 'ROC_of_Difference', 'ROC_of_Volume_Difference',
+        'CE_PE_Volume_Crossover', 'Trend_Strength', 'Alert_Type', 'Confidence_Level',
+      ];
       const csvRows = [headers.join(',')];
-      for (let i = 0; i < summaryRows.length; i++) {
-        const r = summaryRows[i];
-        const rowVpr = r.total_pe_volume && r.total_ce_volume ? (r.total_pe_volume / r.total_ce_volume) : 0;
-        const prev = i > 0 ? summaryRows[i - 1] : null;
-        const cΔ = prev ? (r.total_ce_volume - prev.total_ce_volume) : 0;
-        const pΔ = prev ? (r.total_pe_volume - prev.total_pe_volume) : 0;
-        const deltaVpr = (prev && Math.abs(cΔ) > 0) ? (pΔ / cΔ) : 0;
-
-        const absCe = Math.abs(cΔ), absPe = Math.abs(pΔ);
-        let signedVpr = '';
-        let signal = '';
-        if (prev && absCe > 0) {
-          const mag = absPe / absCe;
-          const sign = ((pΔ >= 0 && cΔ >= 0) || (pΔ <= 0 && cΔ <= 0))
-            ? (mag > 1 ? 1 : -1)
-            : (pΔ >= 0 ? 1 : -1);
-          signedVpr = (sign * mag).toFixed(6);
-          const sv = sign * mag;
-          if (sv > 0) signal = sv >= 1 ? 'Strong Bull' : 'Bull';
-          else signal = sv <= -1 ? 'Strong Bear' : 'Bear';
-        }
-
+      for (const m of metrics) {
+        const rocStr = m.roc == null ? '' : m.roc.toString();
         csvRows.push([
-          r.timestamp, r.total_ce_volume, r.total_pe_volume,
-          rowVpr.toFixed(6), deltaVpr.toFixed(6), cΔ, pΔ, signedVpr, signal,
+          m.timestamp, m.ceVol, m.peVol, m.ceCum, m.peCum, m.volDiff,
+          rocStr, rocStr, m.crossover, m.trend, m.alert, m.confidence,
         ].join(','));
       }
       const blob = new Blob([csvRows.join('\n')], { type: 'text/csv' });
@@ -622,7 +660,7 @@ export async function mount(container) {
       a.download = `volume-logs-${ts.instrument}-${ts.date}.csv`;
       a.click();
       URL.revokeObjectURL(a.href);
-      toast(`Exported ${summaryRows.length} rows`, 'success');
+      toast(`Exported ${metrics.length} rows`, 'success');
     } catch (e) {
       toast('Export failed: ' + e.message, 'error');
     }
@@ -638,124 +676,112 @@ export async function mount(container) {
     try {
       const data = await _fetchVolumeData(ts.instrument, ts.date);
       if (!data) { volumeLogsContent.innerHTML = '<div class="empty-state">No volume data for this date.</div>'; return; }
-      const { summaryRows } = data;
-      const rows = [...summaryRows].reverse();
-      const latest = rows[0];
-      const origSorted = [...summaryRows];
-      const prevLatest = origSorted.length > 1 ? origSorted[origSorted.length - 2] : null;
-      const vpr = latest.total_pe_volume && latest.total_ce_volume ? (latest.total_pe_volume / latest.total_ce_volume) : 0;
-      const latestCeChg = prevLatest ? (latest.total_ce_volume - prevLatest.total_ce_volume) : 0;
-      const latestPeChg = prevLatest ? (latest.total_pe_volume - prevLatest.total_pe_volume) : 0;
-      const latestDeltaVpr = (prevLatest && Math.abs(latestCeChg) > 0) ? (latestPeChg / latestCeChg) : 0;
-      let latestSignedVpr = null;
-      if (prevLatest && Math.abs(latestCeChg) > 0) {
-        const mag = Math.abs(latestPeChg) / Math.abs(latestCeChg);
-        const sign = ((latestPeChg >= 0 && latestCeChg >= 0) || (latestPeChg <= 0 && latestCeChg <= 0))
-          ? (mag > 1 ? 1 : -1)
-          : (latestPeChg >= 0 ? 1 : -1);
-        latestSignedVpr = sign * mag;
-      }
+      const metrics = _computeVolumeMetrics(data.summaryRows);
+      const latest = metrics[metrics.length - 1];
+
+      const trendTone = {
+        'Very Strong': 'bull', 'Strong': 'bull',
+        'Moderate': 'neutral', 'Weak': 'neutral', 'Neutral': 'neutral',
+      }[latest.trend] || 'neutral';
+      const alertTone = latest.alert === 'STRONG CE' ? 'bear'
+                      : latest.alert === 'STRONG PE' ? 'bull' : 'neutral';
 
       const miniSummary = el('div', { style: { display: 'flex', gap: '16px', marginBottom: '12px', flexWrap: 'wrap' } },
         el('div', { class: 'card', style: { padding: '12px 16px', flex: '1', minWidth: '120px' } },
           el('span', { class: 'text-xs muted' }, 'Latest CE Vol'),
-          el('div', { class: 'mono', style: { fontWeight: '700', fontSize: '16px' } }, fmtCompact(latest.total_ce_volume)),
+          el('div', { class: 'mono', style: { fontWeight: '700', fontSize: '16px' } }, fmtCompact(latest.ceVol)),
         ),
         el('div', { class: 'card', style: { padding: '12px 16px', flex: '1', minWidth: '120px' } },
           el('span', { class: 'text-xs muted' }, 'Latest PE Vol'),
-          el('div', { class: 'mono', style: { fontWeight: '700', fontSize: '16px' } }, fmtCompact(latest.total_pe_volume)),
+          el('div', { class: 'mono', style: { fontWeight: '700', fontSize: '16px' } }, fmtCompact(latest.peVol)),
         ),
         el('div', { class: 'card', style: { padding: '12px 16px', flex: '1', minWidth: '120px' } },
-          el('span', { class: 'text-xs muted' }, 'Volume PCR'),
-          el('div', { class: `mono ${vpr >= 1 ? 'bull' : 'bear'}`, style: { fontWeight: '700', fontSize: '16px' } }, fmtNum(vpr, 3)),
+          el('span', { class: 'text-xs muted' }, 'Vol Diff (PE−CE)'),
+          el('div', { class: `mono ${latest.volDiff >= 0 ? 'bull' : 'bear'}`, style: { fontWeight: '700', fontSize: '16px' } }, (latest.volDiff >= 0 ? '+' : '') + fmtCompact(latest.volDiff)),
         ),
         el('div', { class: 'card', style: { padding: '12px 16px', flex: '1', minWidth: '120px' } },
           el('span', { class: 'text-xs muted' }, 'Ticks'),
-          el('div', { class: 'mono', style: { fontWeight: '600' } }, String(rows.length)),
+          el('div', { class: 'mono', style: { fontWeight: '600' } }, String(metrics.length)),
         ),
       );
 
       const miniSummary2 = el('div', { style: { display: 'flex', gap: '16px', marginBottom: '16px', flexWrap: 'wrap' } },
         el('div', { class: 'card', style: { padding: '12px 16px', flex: '1', minWidth: '120px' } },
-          el('span', { class: 'text-xs muted' }, 'CE Vol Change'),
-          el('div', { class: `mono ${latestCeChg >= 0 ? 'bull' : 'bear'}`, style: { fontWeight: '700', fontSize: '16px' } }, (latestCeChg >= 0 ? '+' : '') + fmtCompact(latestCeChg)),
+          el('span', { class: 'text-xs muted' }, 'ROC Vol Diff'),
+          el('div', { class: `mono ${latest.roc == null ? 'dim' : (latest.roc >= 0 ? 'bull' : 'bear')}`, style: { fontWeight: '700', fontSize: '16px' } }, latest.roc == null ? '—' : ((latest.roc >= 0 ? '+' : '') + fmtNum(latest.roc, 2) + '%')),
         ),
         el('div', { class: 'card', style: { padding: '12px 16px', flex: '1', minWidth: '120px' } },
-          el('span', { class: 'text-xs muted' }, 'PE Vol Change'),
-          el('div', { class: `mono ${latestPeChg >= 0 ? 'bull' : 'bear'}`, style: { fontWeight: '700', fontSize: '16px' } }, (latestPeChg >= 0 ? '+' : '') + fmtCompact(latestPeChg)),
+          el('span', { class: 'text-xs muted' }, 'Trend Strength'),
+          el('div', {}, el('span', { class: `change-pill ${trendTone}`, style: { fontSize: '11px' } }, latest.trend)),
         ),
         el('div', { class: 'card', style: { padding: '12px 16px', flex: '1', minWidth: '120px' } },
-          el('span', { class: 'text-xs muted' }, 'Delta VPR'),
-          el('div', { class: `mono ${latestDeltaVpr >= 0 ? 'bull' : 'bear'}`, style: { fontWeight: '700', fontSize: '16px' } }, (latestDeltaVpr >= 0 ? '+' : '') + fmtNum(latestDeltaVpr, 3)),
+          el('span', { class: 'text-xs muted' }, 'Alert Type'),
+          el('div', {}, el('span', { class: `change-pill ${alertTone}`, style: { fontSize: '11px' } }, latest.alert)),
         ),
         el('div', { class: 'card', style: { padding: '12px 16px', flex: '1', minWidth: '120px' } },
-          el('span', { class: 'text-xs muted' }, 'Signed VPR'),
-          el('div', { class: `mono ${latestSignedVpr != null ? (latestSignedVpr >= 0 ? 'bull' : 'bear') : ''}`, style: { fontWeight: '700', fontSize: '16px' } }, latestSignedVpr != null ? ((latestSignedVpr >= 0 ? '+' : '') + fmtNum(latestSignedVpr, 3)) : '—'),
+          el('span', { class: 'text-xs muted' }, 'Confidence'),
+          el('div', { class: `mono ${latest.confidence === 'High' ? 'bull' : 'dim'}`, style: { fontWeight: '700', fontSize: '16px' } }, latest.confidence),
         ),
       );
 
-      const computed = rows.map(r => {
-        const oi = origSorted.indexOf(r);
-        const prevRow = oi > 0 ? origSorted[oi - 1] : null;
-        const rowVpr = r.total_pe_volume && r.total_ce_volume ? (r.total_pe_volume / r.total_ce_volume) : 0;
-        const cΔ = prevRow ? (r.total_ce_volume - prevRow.total_ce_volume) : 0;
-        const pΔ = prevRow ? (r.total_pe_volume - prevRow.total_pe_volume) : 0;
-        const deltaVpr = (prevRow && Math.abs(cΔ) > 0) ? (pΔ / cΔ) : 0;
-        let signedVpr = null;
-        let signal = '—';
-        const absCe = Math.abs(cΔ), absPe = Math.abs(pΔ);
-        if (prevRow && absCe > 0) {
-          const mag = absPe / absCe;
-          const sign = ((pΔ >= 0 && cΔ >= 0) || (pΔ <= 0 && cΔ <= 0))
-            ? (mag > 1 ? 1 : -1)
-            : (pΔ >= 0 ? 1 : -1);
-          signedVpr = sign * mag;
-          signal = signedVpr > 0
-            ? (signedVpr >= 1 ? 'Strong Bull' : 'Bull')
-            : (signedVpr <= -1 ? 'Strong Bear' : 'Bear');
-        }
-        return {
-          timestamp: r.timestamp,
-          ceVol: r.total_ce_volume,
-          peVol: r.total_pe_volume,
-          vpr: rowVpr,
-          deltaVpr,
-          cΔ,
-          pΔ,
-          signedVpr,
-          signal,
-          signalRank: { 'Strong Bull': 2, 'Bull': 1, '—': 0, 'Bear': -1, 'Strong Bear': -2 }[signal] ?? 0,
-        };
-      });
+      // Display order: latest at top
+      const rows = [...metrics].reverse();
+
+      // signed sort key for trend pill ordering
+      const trendRank = { 'Very Strong': 4, 'Strong': 3, 'Moderate': 2, 'Weak': 1, 'Neutral': 0 };
+      const alertRank = { 'STRONG CE': -1, 'NEUTRAL': 0, 'STRONG PE': 1 };
+      const confRank = { 'High': 1, 'Low': 0 };
+      const display = rows.map(r => ({
+        ...r,
+        trendRank: trendRank[r.trend] ?? 0,
+        alertRank: alertRank[r.alert] ?? 0,
+        confRank: confRank[r.confidence] ?? 0,
+      }));
 
       const cols = [
         { key: 'timestamp', label: 'Time', render: r => el('td', { class: 'mono' }, fmtTimeIST(r.timestamp)) },
         { key: 'ceVol', label: 'CE Vol', render: r => el('td', { class: 'mono' }, fmtCompact(r.ceVol)) },
         { key: 'peVol', label: 'PE Vol', render: r => el('td', { class: 'mono' }, fmtCompact(r.peVol)) },
-        { key: 'vpr', label: 'VPR', render: r => el('td', { class: `mono ${r.vpr >= 1 ? 'bull' : 'bear'}` }, fmtNum(r.vpr, 3)) },
-        { key: 'deltaVpr', label: 'ΔVPR', render: r => el('td', { class: `mono ${r.deltaVpr >= 0 ? 'bull' : 'bear'}` }, (r.deltaVpr >= 0 ? '+' : '') + fmtNum(r.deltaVpr, 3)) },
-        { key: 'cΔ', label: 'CE Δ', render: r => el('td', { class: `mono ${r.cΔ >= 0 ? 'bull' : 'bear'}` }, (r.cΔ >= 0 ? '+' : '') + fmtCompact(r.cΔ)) },
-        { key: 'pΔ', label: 'PE Δ', render: r => el('td', { class: `mono ${r.pΔ >= 0 ? 'bull' : 'bear'}` }, (r.pΔ >= 0 ? '+' : '') + fmtCompact(r.pΔ)) },
-        { key: 'signedVpr', label: 'Signed VPR', render: r => {
-          if (r.signedVpr == null) return el('td', { class: 'mono dim' }, '—');
-          const tone = r.signedVpr > 0 ? 'bull' : r.signedVpr < 0 ? 'bear' : '';
-          return el('td', { class: `mono ${tone}`, style: { fontWeight: '600' } }, (r.signedVpr >= 0 ? '+' : '') + fmtNum(r.signedVpr, 3));
+        { key: 'ceCum', label: 'CE Vol Cum', render: r => el('td', { class: 'mono' }, fmtCompact(r.ceCum)) },
+        { key: 'peCum', label: 'PE Vol Cum', render: r => el('td', { class: 'mono' }, fmtCompact(r.peCum)) },
+        { key: 'volDiff', label: 'Vol Diff (PE−CE)', render: r => el('td', { class: `mono ${r.volDiff >= 0 ? 'bull' : 'bear'}`, style: { fontWeight: '600' } }, (r.volDiff >= 0 ? '+' : '') + fmtCompact(r.volDiff)) },
+        { key: 'roc', label: 'ROC Vol Diff %', render: r => {
+          if (r.roc == null) return el('td', { class: 'mono dim' }, '—');
+          return el('td', { class: `mono ${r.roc >= 0 ? 'bull' : 'bear'}` }, (r.roc >= 0 ? '+' : '') + fmtNum(r.roc, 2));
         } },
-        { key: 'signalRank', label: 'Signal',
-          render: r => {
-            const tone = r.signal === 'Strong Bull' || r.signal === 'Bull' ? 'bull'
-                       : r.signal === 'Strong Bear' || r.signal === 'Bear' ? 'bear' : 'neutral';
-            return el('td', {}, el('span', { class: `change-pill ${tone}`, style: { fontSize: '10px' } }, r.signal));
-          },
+        { key: 'crossover', label: 'Vol Crossover', render: r => {
+          if (!r.crossover) return el('td', { class: 'mono dim' }, '—');
+          const tone = r.crossover === 'PE Cross Up' ? 'bull' : 'bear';
+          return el('td', {}, el('span', { class: `change-pill ${tone}`, style: { fontSize: '10px', fontWeight: '700' } }, r.crossover));
+        },
           sortFilter: (rs, dir) => rs
-            .filter(r => r.signal !== '—')
+            .filter(r => r.crossover)
             .sort((a, b) => dir === 'asc'
               ? String(a.timestamp).localeCompare(String(b.timestamp))
               : String(b.timestamp).localeCompare(String(a.timestamp))),
         },
+        { key: 'trendRank', label: 'Trend',
+          render: r => {
+            const tone = (r.trend === 'Very Strong' || r.trend === 'Strong') ? 'bull'
+                       : r.trend === 'Neutral' ? 'neutral' : 'neutral';
+            return el('td', {}, el('span', { class: `change-pill ${tone}`, style: { fontSize: '10px' } }, r.trend));
+          } },
+        { key: 'alertRank', label: 'Alert',
+          render: r => {
+            const tone = r.alert === 'STRONG CE' ? 'bear' : r.alert === 'STRONG PE' ? 'bull' : 'neutral';
+            return el('td', {}, el('span', { class: `change-pill ${tone}`, style: { fontSize: '10px', fontWeight: '700' } }, r.alert));
+          },
+          sortFilter: (rs, dir) => rs
+            .filter(r => r.alert !== 'NEUTRAL')
+            .sort((a, b) => dir === 'asc'
+              ? String(a.timestamp).localeCompare(String(b.timestamp))
+              : String(b.timestamp).localeCompare(String(a.timestamp))),
+        },
+        { key: 'confRank', label: 'Confidence',
+          render: r => el('td', { class: `mono ${r.confidence === 'High' ? 'bull' : 'dim'}` }, r.confidence) },
       ];
 
-      const t = buildSortableTable(cols, computed);
+      const t = buildSortableTable(cols, display);
 
       volumeLogsContent.innerHTML = '';
       volumeLogsContent.appendChild(miniSummary);
