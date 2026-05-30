@@ -555,7 +555,13 @@ export async function mount(container) {
 
   async function _fetchVolumeData(instrument, date) {
     if (!instrument || !date) return null;
-    const raw = await api.totalVolume(instrument, date);
+    // Fetch volume + computed_ticks in parallel; computed_ticks supplies the
+    // OI cumulative difference (oi_difference = PE_cumm - CE_cumm) so we can
+    // expose ROC of OI Diff alongside ROC of Vol Diff.
+    const [raw, ticksRaw] = await Promise.all([
+      api.totalVolume(instrument, date),
+      api.computedTicks(instrument, date).catch(() => []),
+    ]);
     const rawRows = Array.isArray(raw) ? raw : (raw.data || raw.rows || []);
     const rows = filterMarketHours(rawRows);
     if (!rows.length) return null;
@@ -576,7 +582,16 @@ export async function mount(container) {
       }
     });
     const summaryRows = [...timeMap.values()].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
-    return { summaryRows };
+
+    // Build timestamp -> oi_difference lookup (per-minute floor matches computed_ticks)
+    const ticksArr = Array.isArray(ticksRaw) ? ticksRaw : (ticksRaw.ticks || ticksRaw.data || ticksRaw.rows || []);
+    const oiDiffByTs = new Map();
+    for (const t of ticksArr) {
+      const ts = t.timestamp;
+      if (!ts || t.oi_difference == null) continue;
+      oiDiffByTs.set(ts, t.oi_difference);
+    }
+    return { summaryRows, oiDiffByTs };
   }
 
   // Trend strength buckets derived from |ROC of Vol Diff|:
@@ -601,10 +616,11 @@ export async function mount(container) {
   // The backend's total_ce_volume / total_pe_volume are the per-minute
   // volumes summed across strikes (the broker reports per-tick volume per
   // strike, not running totals). Cumulative is summed in JS from market open.
-  function _computeVolumeMetrics(summaryRows) {
+  function _computeVolumeMetrics(summaryRows, oiDiffByTs) {
     const out = [];
     let ceCum = 0, peCum = 0;
     let prevVolDiff = null;
+    let prevOiDiff = null;
     for (let i = 0; i < summaryRows.length; i++) {
       const r = summaryRows[i];
       const ceVol = r.total_ce_volume || 0;
@@ -612,23 +628,35 @@ export async function mount(container) {
       ceCum += ceVol;
       peCum += peVol;
       const volDiff = peCum - ceCum;
-      let roc = null;
+      // Volume Difference ROC
+      let volRoc = null;
       if (prevVolDiff !== null && Math.abs(prevVolDiff) > 0) {
-        roc = (volDiff - prevVolDiff) / Math.abs(prevVolDiff) * 100;
+        volRoc = (volDiff - prevVolDiff) / Math.abs(prevVolDiff) * 100;
+      }
+      // OI Difference ROC (from computed_ticks.oi_difference = PE_cumm - CE_cumm)
+      const oiDiff = (oiDiffByTs && oiDiffByTs.has(r.timestamp)) ? oiDiffByTs.get(r.timestamp) : null;
+      let oiRoc = null;
+      if (oiDiff !== null && prevOiDiff !== null && Math.abs(prevOiDiff) > 0) {
+        oiRoc = (oiDiff - prevOiDiff) / Math.abs(prevOiDiff) * 100;
       }
       let crossover = '';
       if (prevVolDiff !== null) {
         if (prevVolDiff < 0 && volDiff >= 0) crossover = 'PE Cross Up';
         else if (prevVolDiff > 0 && volDiff <= 0) crossover = 'CE Cross Up';
       }
-      const trend = _classifyTrend(roc == null ? null : Math.abs(roc));
-      const alert = _classifyAlert(trend, roc);
+      // Trend / Alert / Confidence keyed off volume ROC (the institutional
+      // participation gauge); OI ROC is an additional confirmation column.
+      const trend = _classifyTrend(volRoc == null ? null : Math.abs(volRoc));
+      const alert = _classifyAlert(trend, volRoc);
       const confidence = _classifyConfidence(trend);
       out.push({
         timestamp: r.timestamp,
-        ceVol, peVol, ceCum, peCum, volDiff, roc, crossover, trend, alert, confidence,
+        ceVol, peVol, ceCum, peCum, volDiff,
+        oiDiff, oiRoc, volRoc,
+        crossover, trend, alert, confidence,
       });
       prevVolDiff = volDiff;
+      if (oiDiff !== null) prevOiDiff = oiDiff;
     }
     return out;
   }
@@ -640,7 +668,7 @@ export async function mount(container) {
     try {
       const data = await _fetchVolumeData(ts.instrument, ts.date);
       if (!data) { toast('No data to export', 'error'); return; }
-      const metrics = _computeVolumeMetrics(data.summaryRows);
+      const metrics = _computeVolumeMetrics(data.summaryRows, data.oiDiffByTs);
       const headers = [
         'Time', 'CE_Volume', 'PE_Volume', 'CE_Volume_Cumulative', 'PE_Volume_Cumulative',
         'Volume_Difference_PE_minus_CE', 'ROC_of_Difference', 'ROC_of_Volume_Difference',
@@ -648,10 +676,11 @@ export async function mount(container) {
       ];
       const csvRows = [headers.join(',')];
       for (const m of metrics) {
-        const rocStr = m.roc == null ? '' : m.roc.toString();
+        const oiRocStr = m.oiRoc == null ? '' : m.oiRoc.toString();
+        const volRocStr = m.volRoc == null ? '' : m.volRoc.toString();
         csvRows.push([
           m.timestamp, m.ceVol, m.peVol, m.ceCum, m.peCum, m.volDiff,
-          rocStr, rocStr, m.crossover, m.trend, m.alert, m.confidence,
+          oiRocStr, volRocStr, m.crossover, m.trend, m.alert, m.confidence,
         ].join(','));
       }
       const blob = new Blob([csvRows.join('\n')], { type: 'text/csv' });
@@ -676,7 +705,7 @@ export async function mount(container) {
     try {
       const data = await _fetchVolumeData(ts.instrument, ts.date);
       if (!data) { volumeLogsContent.innerHTML = '<div class="empty-state">No volume data for this date.</div>'; return; }
-      const metrics = _computeVolumeMetrics(data.summaryRows);
+      const metrics = _computeVolumeMetrics(data.summaryRows, data.oiDiffByTs);
       const latest = metrics[metrics.length - 1];
 
       const trendTone = {
@@ -708,7 +737,7 @@ export async function mount(container) {
       const miniSummary2 = el('div', { style: { display: 'flex', gap: '16px', marginBottom: '16px', flexWrap: 'wrap' } },
         el('div', { class: 'card', style: { padding: '12px 16px', flex: '1', minWidth: '120px' } },
           el('span', { class: 'text-xs muted' }, 'ROC Vol Diff'),
-          el('div', { class: `mono ${latest.roc == null ? 'dim' : (latest.roc >= 0 ? 'bull' : 'bear')}`, style: { fontWeight: '700', fontSize: '16px' } }, latest.roc == null ? '—' : ((latest.roc >= 0 ? '+' : '') + fmtNum(latest.roc, 2) + '%')),
+          el('div', { class: `mono ${latest.volRoc == null ? 'dim' : (latest.volRoc >= 0 ? 'bull' : 'bear')}`, style: { fontWeight: '700', fontSize: '16px' } }, latest.volRoc == null ? '—' : ((latest.volRoc >= 0 ? '+' : '') + fmtNum(latest.volRoc, 2) + '%')),
         ),
         el('div', { class: 'card', style: { padding: '12px 16px', flex: '1', minWidth: '120px' } },
           el('span', { class: 'text-xs muted' }, 'Trend Strength'),
@@ -745,13 +774,13 @@ export async function mount(container) {
         { key: 'ceCum', label: 'CE Vol Cum', render: r => el('td', { class: 'mono' }, fmtCompact(r.ceCum)) },
         { key: 'peCum', label: 'PE Vol Cum', render: r => el('td', { class: 'mono' }, fmtCompact(r.peCum)) },
         { key: 'volDiff', label: 'Vol Diff (PE−CE)', render: r => el('td', { class: `mono ${r.volDiff >= 0 ? 'bull' : 'bear'}`, style: { fontWeight: '600' } }, (r.volDiff >= 0 ? '+' : '') + fmtCompact(r.volDiff)) },
-        { key: 'roc', label: 'ROC of Diff %', render: r => {
-          if (r.roc == null) return el('td', { class: 'mono dim' }, '—');
-          return el('td', { class: `mono ${r.roc >= 0 ? 'bull' : 'bear'}` }, (r.roc >= 0 ? '+' : '') + fmtNum(r.roc, 2));
+        { key: 'oiRoc', label: 'ROC of Diff %', render: r => {
+          if (r.oiRoc == null) return el('td', { class: 'mono dim' }, '—');
+          return el('td', { class: `mono ${r.oiRoc >= 0 ? 'bull' : 'bear'}` }, (r.oiRoc >= 0 ? '+' : '') + fmtNum(r.oiRoc, 2));
         } },
-        { key: 'roc', label: 'ROC of Vol Diff %', render: r => {
-          if (r.roc == null) return el('td', { class: 'mono dim' }, '—');
-          return el('td', { class: `mono ${r.roc >= 0 ? 'bull' : 'bear'}` }, (r.roc >= 0 ? '+' : '') + fmtNum(r.roc, 2));
+        { key: 'volRoc', label: 'ROC of Vol Diff %', render: r => {
+          if (r.volRoc == null) return el('td', { class: 'mono dim' }, '—');
+          return el('td', { class: `mono ${r.volRoc >= 0 ? 'bull' : 'bear'}` }, (r.volRoc >= 0 ? '+' : '') + fmtNum(r.volRoc, 2));
         } },
         { key: 'crossover', label: 'Vol Crossover', render: r => {
           if (!r.crossover) return el('td', { class: 'mono dim' }, '—');
