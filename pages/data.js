@@ -745,7 +745,11 @@ export async function mount(container) {
         { key: 'ceCum', label: 'CE Vol Cum', render: r => el('td', { class: 'mono' }, fmtCompact(r.ceCum)) },
         { key: 'peCum', label: 'PE Vol Cum', render: r => el('td', { class: 'mono' }, fmtCompact(r.peCum)) },
         { key: 'volDiff', label: 'Vol Diff (PE−CE)', render: r => el('td', { class: `mono ${r.volDiff >= 0 ? 'bull' : 'bear'}`, style: { fontWeight: '600' } }, (r.volDiff >= 0 ? '+' : '') + fmtCompact(r.volDiff)) },
-        { key: 'roc', label: 'ROC Vol Diff %', render: r => {
+        { key: 'roc', label: 'ROC of Diff %', render: r => {
+          if (r.roc == null) return el('td', { class: 'mono dim' }, '—');
+          return el('td', { class: `mono ${r.roc >= 0 ? 'bull' : 'bear'}` }, (r.roc >= 0 ? '+' : '') + fmtNum(r.roc, 2));
+        } },
+        { key: 'roc', label: 'ROC of Vol Diff %', render: r => {
           if (r.roc == null) return el('td', { class: 'mono dim' }, '—');
           return el('td', { class: `mono ${r.roc >= 0 ? 'bull' : 'bear'}` }, (r.roc >= 0 ? '+' : '') + fmtNum(r.roc, 2));
         } },
