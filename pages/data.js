@@ -94,6 +94,7 @@ const tabState = {
   'oi-analytics': { instrument: 'nifty', date: new Date().toISOString().slice(0, 10) },
   'oi-logs':      { instrument: 'nifty', date: new Date().toISOString().slice(0, 10) },
   'volume-logs':  { instrument: 'nifty', date: new Date().toISOString().slice(0, 10) },
+  'sr':           { instrument: 'nifty', date: new Date().toISOString().slice(0, 10) },
   'entry-signals':   { instrument: 'nifty', date: new Date().toISOString().slice(0, 10) },
   'all-logs':     { instrument: 'nifty', date: new Date().toISOString().slice(0, 10) },
 };
@@ -160,6 +161,7 @@ export async function mount(container) {
     { id: 'oi-analytics', label: 'OI Analytics' },
     { id: 'oi-logs', label: 'OI Logs' },
     { id: 'volume-logs', label: 'Volume Logs' },
+    { id: 'sr', label: 'S/R' },
     { id: 'entry-signals', label: 'Entry Signals' },
     { id: 'all-logs', label: 'All Logs' },
   ];
@@ -178,12 +180,14 @@ export async function mount(container) {
   const oiAnalyticsPanel = el('div', { class: 'tab-panel' });
   const oiLogsPanel = el('div', { class: 'tab-panel' });
   const volumeLogsPanel = el('div', { class: 'tab-panel' });
+  const srPanel = el('div', { class: 'tab-panel' });
   const entrySignalsPanel = el('div', { class: 'tab-panel' });
   const allLogsPanel = el('div', { class: 'tab-panel' });
 
   page.appendChild(oiAnalyticsPanel);
   page.appendChild(oiLogsPanel);
   page.appendChild(volumeLogsPanel);
+  page.appendChild(srPanel);
   page.appendChild(entrySignalsPanel);
   page.appendChild(allLogsPanel);
 
@@ -210,6 +214,7 @@ export async function mount(container) {
         else if (tabId === 'oi-analytics') renderOiAnalytics();
         else if (tabId === 'oi-logs') renderOiLogs();
         else if (tabId === 'volume-logs') renderVolumeLogs();
+        else if (tabId === 'sr') renderSR();
         else if (tabId === 'entry-signals') renderEntrySignals();
       },
     });
@@ -223,6 +228,7 @@ export async function mount(container) {
         else if (tabId === 'oi-analytics') renderOiAnalytics();
         else if (tabId === 'oi-logs') renderOiLogs();
         else if (tabId === 'volume-logs') renderVolumeLogs();
+        else if (tabId === 'sr') renderSR();
         else if (tabId === 'entry-signals') renderEntrySignals();
       },
       placeholder: 'All dates',
@@ -248,12 +254,14 @@ export async function mount(container) {
     oiAnalyticsPanel.style.display = tabId === 'oi-analytics' ? '' : 'none';
     oiLogsPanel.style.display = tabId === 'oi-logs' ? '' : 'none';
     volumeLogsPanel.style.display = tabId === 'volume-logs' ? '' : 'none';
+    srPanel.style.display = tabId === 'sr' ? '' : 'none';
     entrySignalsPanel.style.display = tabId === 'entry-signals' ? '' : 'none';
     allLogsPanel.style.display = tabId === 'all-logs' ? '' : 'none';
     if (tabId === 'all-logs') renderBody();
     else if (tabId === 'oi-analytics') renderOiAnalytics();
     else if (tabId === 'oi-logs') renderOiLogs();
     else if (tabId === 'volume-logs') renderVolumeLogs();
+    else if (tabId === 'sr') renderSR();
     else if (tabId === 'entry-signals') renderEntrySignals();
   }
 
@@ -822,6 +830,258 @@ export async function mount(container) {
       volumeLogsContent.appendChild(el('div', { class: 'data-grid-wrap' }, t));
     } catch (e) {
       if (!silent) volumeLogsContent.innerHTML = `<div class="empty-state"><span class="bear">Failed</span><span class="text-xs mono dim">${e.message}</span></div>`;
+    }
+  }
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // S/R (SUPPORT & RESISTANCE) TAB
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // Implements the institutional Support/Resistance engine:
+  //   * Imaginary pair = strike just below spot + strike just above spot
+  //   * Resistance: scan 5 CE strikes from pair_lower upward; primary = strike
+  //     with the highest combined %-rank across (OI, Volume, Chg OI)
+  //   * Support: scan 5 PE strikes from pair_upper downward; same logic
+  //   * WTT (Weak Towards Top): strike ABOVE primary resistance has avg pct >75
+  //   * WTB (Weak Towards Bottom): strike BELOW primary support has avg pct >75
+  //   * Intraday shift history is accumulated client-side per (instr, date)
+  const srContent = el('div');
+  buildTabToolbar(srPanel, 'sr');
+  srPanel.appendChild(srContent);
+
+  function _srPickPair(spot, strikes) {
+    if (spot == null || !strikes.length) return null;
+    const sorted = [...strikes].sort((a, b) => a.strike - b.strike);
+    let lower = null, upper = null;
+    for (const s of sorted) {
+      if (s.strike <= spot) lower = s;
+      if (s.strike > spot && upper == null) upper = s;
+    }
+    if (!lower || !upper) return null;
+    return { lower, upper, all: sorted };
+  }
+
+  // Build a 5-strike scan window: for CE/resistance start at pair.lower and
+  // walk up; for PE/support start at pair.upper and walk down.
+  function _srScan(pair, side) {
+    if (!pair) return [];
+    const sorted = pair.all;
+    const startStrike = side === 'CE' ? pair.lower.strike : pair.upper.strike;
+    const startIdx = sorted.findIndex(s => s.strike === startStrike);
+    if (startIdx < 0) return [];
+    const step = side === 'CE' ? 1 : -1;
+    const out = [];
+    for (let i = 0; i < 5; i++) {
+      const idx = startIdx + i * step;
+      if (idx < 0 || idx >= sorted.length) break;
+      out.push(sorted[idx]);
+    }
+    return out;
+  }
+
+  // For each row, compute oi/vol/chg as percentages of the column max,
+  // then a "combined %" = average of the three. Highest combined = primary.
+  function _srPercentRows(scan, side) {
+    const get = (r) => side === 'CE'
+      ? { oi: r.ce_oi, vol: r.ce_volume, chg: r.ce_chg_oi }
+      : { oi: r.pe_oi, vol: r.pe_volume, chg: r.pe_chg_oi };
+    const vals = scan.map(get);
+    const maxOi = Math.max(0, ...vals.map(v => v.oi || 0));
+    const maxVol = Math.max(0, ...vals.map(v => v.vol || 0));
+    const maxChg = Math.max(0, ...vals.map(v => Math.max(0, v.chg || 0)));
+    const out = scan.map((r, i) => {
+      const v = vals[i];
+      const oiPct = maxOi > 0 ? (v.oi / maxOi) * 100 : 0;
+      const volPct = maxVol > 0 ? (v.vol / maxVol) * 100 : 0;
+      const chgPct = maxChg > 0 ? (Math.max(0, v.chg) / maxChg) * 100 : 0;
+      return {
+        strike: r.strike, oi: v.oi, vol: v.vol, chg: v.chg,
+        oiPct, volPct, chgPct,
+        combinedPct: (oiPct + volPct + chgPct) / 3,
+      };
+    });
+    let primaryIdx = 0;
+    for (let i = 1; i < out.length; i++) if (out[i].combinedPct > out[primaryIdx].combinedPct) primaryIdx = i;
+    return { rows: out, primaryIdx };
+  }
+
+  // WTT / WTB: nearby strike (the next one in scan order after primary) has
+  // avg percentage >75 — meaning the wall could shift one step further.
+  function _srWeakness(percentRows, primaryIdx) {
+    const nextIdx = primaryIdx + 1;
+    if (nextIdx >= percentRows.length) return false;
+    const r = percentRows[nextIdx];
+    const avg = (r.oiPct + r.volPct + r.chgPct) / 3;
+    return avg > 75;
+  }
+
+  // History is keyed by instrument+date so polling re-renders preserve it.
+  const srShiftHistory = new Map();
+  function _srHistoryKey(instrument, date) { return `${instrument}|${date}`; }
+  function _srRecordShift(instrument, date, snapshot) {
+    const key = _srHistoryKey(instrument, date);
+    if (!srShiftHistory.has(key)) srShiftHistory.set(key, []);
+    const hist = srShiftHistory.get(key);
+    const prev = hist[hist.length - 1];
+    if (prev && prev.support === snapshot.support && prev.resistance === snapshot.resistance
+        && prev.wtb === snapshot.wtb && prev.wtt === snapshot.wtt) {
+      return hist; // no change, skip
+    }
+    let direction = 'Init';
+    if (prev) {
+      const supUp = snapshot.support > prev.support;
+      const supDn = snapshot.support < prev.support;
+      const resUp = snapshot.resistance > prev.resistance;
+      const resDn = snapshot.resistance < prev.resistance;
+      if ((supUp && resUp) || (supUp && !resDn) || (!supDn && resUp)) direction = 'Bullish';
+      else if ((supDn && resDn) || (supDn && !resUp) || (!supUp && resDn)) direction = 'Bearish';
+      else direction = 'Range';
+    }
+    hist.push({ ...snapshot, direction });
+    return hist;
+  }
+
+  async function renderSR(silent = false) {
+    if (!silent) srContent.innerHTML = '<div class="dim" style="padding:24px">Loading option chain…</div>';
+    const ts = tabState['sr'];
+    if (!ts.instrument || !ts.date) {
+      srContent.innerHTML = '<div class="empty-state">Select a date to view Support/Resistance.</div>';
+      return;
+    }
+    try {
+      const payload = await api.optionChain(ts.instrument, ts.date);
+      if (!payload || !payload.strikes?.length) {
+        srContent.innerHTML = '<div class="empty-state">No option-chain data for this date.</div>';
+        return;
+      }
+      const spot = payload.spot_price;
+      const pair = _srPickPair(spot, payload.strikes);
+      if (!pair) {
+        srContent.innerHTML = '<div class="empty-state">Could not bracket spot with strikes.</div>';
+        return;
+      }
+      const ceScan = _srScan(pair, 'CE');
+      const peScan = _srScan(pair, 'PE');
+      const ceData = _srPercentRows(ceScan, 'CE');
+      const peData = _srPercentRows(peScan, 'PE');
+      const primaryResistance = ceData.rows[ceData.primaryIdx]?.strike;
+      const primarySupport = peData.rows[peData.primaryIdx]?.strike;
+      const isWTT = _srWeakness(ceData.rows, ceData.primaryIdx);
+      const isWTB = _srWeakness(peData.rows, peData.primaryIdx);
+
+      const hist = _srRecordShift(ts.instrument, ts.date, {
+        timestamp: payload.timestamp,
+        spot,
+        pairLow: pair.lower.strike,
+        pairHigh: pair.upper.strike,
+        support: primarySupport,
+        resistance: primaryResistance,
+        wtt: isWTT,
+        wtb: isWTB,
+      });
+
+      // ── Summary strip ──
+      const lastShift = hist[hist.length - 1];
+      const summary = el('div', { class: 'card', style: { display: 'flex', gap: '24px', alignItems: 'center', flexWrap: 'wrap', padding: '14px 20px', marginBottom: '12px' } },
+        el('div', {},
+          el('span', { class: 'text-xs muted' }, 'Spot'),
+          el('div', { class: 'mono', style: { fontWeight: '700', fontSize: '18px' } }, fmtNum(spot, 2)),
+        ),
+        el('div', { style: { borderLeft: '1px solid var(--border)', paddingLeft: '20px' } },
+          el('span', { class: 'text-xs muted' }, 'Imaginary Pair'),
+          el('div', { class: 'mono', style: { fontWeight: '600' } }, `${pair.lower.strike} / ${pair.upper.strike}`),
+        ),
+        el('div', { style: { borderLeft: '1px solid var(--border)', paddingLeft: '20px' } },
+          el('span', { class: 'text-xs muted' }, 'Resistance'),
+          el('div', { class: 'mono bear', style: { fontWeight: '700', fontSize: '18px' } }, String(primaryResistance ?? '—')),
+        ),
+        el('div', { style: { borderLeft: '1px solid var(--border)', paddingLeft: '20px' } },
+          el('span', { class: 'text-xs muted' }, 'Support'),
+          el('div', { class: 'mono bull', style: { fontWeight: '700', fontSize: '18px' } }, String(primarySupport ?? '—')),
+        ),
+        el('div', { style: { borderLeft: '1px solid var(--border)', paddingLeft: '20px' } },
+          el('span', { class: 'text-xs muted' }, 'Resistance state'),
+          el('div', {}, el('span', { class: `change-pill ${isWTT ? 'bear' : 'neutral'}`, style: { fontSize: '11px', fontWeight: '700' } }, isWTT ? 'WTT' : 'Firm')),
+        ),
+        el('div', { style: { borderLeft: '1px solid var(--border)', paddingLeft: '20px' } },
+          el('span', { class: 'text-xs muted' }, 'Support state'),
+          el('div', {}, el('span', { class: `change-pill ${isWTB ? 'bull' : 'neutral'}`, style: { fontSize: '11px', fontWeight: '700' } }, isWTB ? 'WTB' : 'Firm')),
+        ),
+        el('div', { style: { borderLeft: '1px solid var(--border)', paddingLeft: '20px' } },
+          el('span', { class: 'text-xs muted' }, 'Shift'),
+          el('div', {}, el('span', { class: `change-pill ${lastShift.direction === 'Bullish' ? 'bull' : lastShift.direction === 'Bearish' ? 'bear' : 'neutral'}`, style: { fontSize: '11px', fontWeight: '700' } }, lastShift.direction)),
+        ),
+        el('div', { style: { borderLeft: '1px solid var(--border)', paddingLeft: '20px' } },
+          el('span', { class: 'text-xs muted' }, 'As of'),
+          el('div', { class: 'mono dim text-xs' }, fmtTimeIST(payload.timestamp)),
+        ),
+      );
+
+      // ── Side-by-side: CE (resistance) and PE (support) tables ──
+      const buildSideTable = (title, sideData, primaryStrike) => {
+        const wrap = el('div', { class: 'card', style: { padding: '14px 16px' } });
+        wrap.appendChild(el('div', { style: { fontSize: '13px', fontWeight: '700', marginBottom: '10px', textTransform: 'uppercase', letterSpacing: '0.5px' } }, title));
+        const table = el('table', { class: 'data-grid', style: { width: '100%' } });
+        const thead = el('thead');
+        const headRow = el('tr');
+        ['Strike', 'OI', 'Vol', 'Chg OI', 'OI %', 'Vol %', 'Chg OI %'].forEach(h => headRow.appendChild(el('th', {}, h)));
+        thead.appendChild(headRow);
+        table.appendChild(thead);
+        const tbody = el('tbody');
+        sideData.rows.forEach((r, i) => {
+          const isPrimary = r.strike === primaryStrike;
+          const tr = el('tr', { style: isPrimary ? { background: 'rgba(255,255,255,0.04)', fontWeight: '600' } : {} });
+          tr.appendChild(el('td', { class: 'mono', style: isPrimary ? { color: 'var(--accent)' } : {} }, String(r.strike) + (isPrimary ? ' ★' : '')));
+          tr.appendChild(el('td', { class: 'mono' }, fmtCompact(r.oi)));
+          tr.appendChild(el('td', { class: 'mono' }, fmtCompact(r.vol)));
+          tr.appendChild(el('td', { class: `mono ${r.chg >= 0 ? 'bull' : 'bear'}` }, (r.chg >= 0 ? '+' : '') + fmtCompact(r.chg)));
+          const pctCell = (pct) => el('td', { class: `mono ${pct >= 75 ? 'bull' : pct >= 50 ? 'neutral' : 'dim'}` }, fmtNum(pct, 0) + '%');
+          tr.appendChild(pctCell(r.oiPct));
+          tr.appendChild(pctCell(r.volPct));
+          tr.appendChild(pctCell(r.chgPct));
+          tbody.appendChild(tr);
+        });
+        table.appendChild(tbody);
+        wrap.appendChild(table);
+        return wrap;
+      };
+
+      const sidesRow = el('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '12px' } },
+        buildSideTable('Resistance (CE scan ↑)', ceData, primaryResistance),
+        buildSideTable('Support (PE scan ↓)', peData, primarySupport),
+      );
+
+      // ── Intraday shift history ──
+      const histCard = el('div', { class: 'card', style: { padding: '14px 16px' } });
+      histCard.appendChild(el('div', { style: { fontSize: '13px', fontWeight: '700', marginBottom: '10px', textTransform: 'uppercase', letterSpacing: '0.5px' } }, `Intraday Shift History (${hist.length})`));
+      const histTable = el('table', { class: 'data-grid', style: { width: '100%' } });
+      const histHead = el('thead');
+      const histHeadRow = el('tr');
+      ['Time', 'Spot', 'Pair', 'Support', 'Resistance', 'WTB', 'WTT', 'Direction'].forEach(h => histHeadRow.appendChild(el('th', {}, h)));
+      histHead.appendChild(histHeadRow);
+      histTable.appendChild(histHead);
+      const histBody = el('tbody');
+      [...hist].reverse().forEach(h => {
+        const tr = el('tr');
+        tr.appendChild(el('td', { class: 'mono' }, fmtTimeIST(h.timestamp)));
+        tr.appendChild(el('td', { class: 'mono' }, fmtNum(h.spot, 2)));
+        tr.appendChild(el('td', { class: 'mono dim' }, `${h.pairLow}/${h.pairHigh}`));
+        tr.appendChild(el('td', { class: 'mono bull' }, String(h.support ?? '—')));
+        tr.appendChild(el('td', { class: 'mono bear' }, String(h.resistance ?? '—')));
+        tr.appendChild(el('td', {}, h.wtb ? el('span', { class: 'change-pill bull', style: { fontSize: '10px' } }, 'WTB') : el('span', { class: 'mono dim' }, '—')));
+        tr.appendChild(el('td', {}, h.wtt ? el('span', { class: 'change-pill bear', style: { fontSize: '10px' } }, 'WTT') : el('span', { class: 'mono dim' }, '—')));
+        const tone = h.direction === 'Bullish' ? 'bull' : h.direction === 'Bearish' ? 'bear' : 'neutral';
+        tr.appendChild(el('td', {}, el('span', { class: `change-pill ${tone}`, style: { fontSize: '10px', fontWeight: '700' } }, h.direction)));
+        histBody.appendChild(tr);
+      });
+      histTable.appendChild(histBody);
+      histCard.appendChild(el('div', { class: 'data-grid-wrap', style: { maxHeight: '320px' } }, histTable));
+
+      srContent.innerHTML = '';
+      srContent.appendChild(summary);
+      srContent.appendChild(sidesRow);
+      srContent.appendChild(histCard);
+    } catch (e) {
+      if (!silent) srContent.innerHTML = `<div class="empty-state"><span class="bear">Failed</span><span class="text-xs mono dim">${e.message}</span></div>`;
     }
   }
 
@@ -1395,6 +1655,7 @@ export async function mount(container) {
     else if (activeTab === 'oi-analytics') renderOiAnalytics(true);
     else if (activeTab === 'oi-logs') renderOiLogs(true);
     else if (activeTab === 'volume-logs') renderVolumeLogs(true);
+    else if (activeTab === 'sr') renderSR(true);
     else if (activeTab === 'entry-signals') renderEntrySignals(true);
   }, 60000);
 }
