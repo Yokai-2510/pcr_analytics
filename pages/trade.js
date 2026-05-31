@@ -9,6 +9,7 @@ const STORAGE_KEY = 'trade_config_v1';
 const DEFAULT_CONFIG = {
   mode: 'paper',
   auto_execute: false,
+  signal_mode: 'oi_only',
   cooldown_minutes: 0,
   instruments: ['nifty'],
   strike_mode: 'atm',
@@ -194,6 +195,17 @@ function renderEntrySection(cfg) {
     onChange: (on) => { cfg.auto_execute = on; },
   });
 
+  const signalModeSel = Select({
+    options: [
+      { value: 'oi_only',     label: 'OI only — cumulative OI diff crossover' },
+      { value: 'volume_only', label: 'Volume only — cumulative volume diff crossover' },
+      { value: 'combined',    label: 'Combined — both OI + Volume must agree' },
+    ],
+    value: cfg.signal_mode || 'oi_only',
+    width: '320px',
+    onChange: (v) => { cfg.signal_mode = v; },
+  });
+
   const directionRules = el('div', {
     style: {
       display: 'grid',
@@ -228,6 +240,11 @@ function renderEntrySection(cfg) {
       label: 'Auto-execute on signal',
       input: autoExecToggle.el,
       hint: 'When off, signals appear in the Data tab but no orders fire.',
+    }),
+    FormField({
+      label: 'Entry signal source',
+      input: signalModeSel.el,
+      hint: 'OI only: proven strategy. Volume only: institutional participation crossover. Combined: both must agree — fewer trades, higher confidence.',
     }),
     FormField({
       label: 'Entry direction (auto)',
