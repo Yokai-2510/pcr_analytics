@@ -948,6 +948,17 @@ export async function mount(container) {
       return;
     }
     try {
+      const histKey = _srHistoryKey(ts.instrument, ts.date);
+      // Seed history from backend if first load for this instrument+date
+      if (!srShiftHistory.has(histKey)) {
+        try {
+          const backfill = await api.srHistory(ts.instrument, ts.date);
+          if (Array.isArray(backfill) && backfill.length) {
+            srShiftHistory.set(histKey, backfill);
+          }
+        } catch (_) {}
+      }
+
       const payload = await api.optionChain(ts.instrument, ts.date);
       if (!payload || !payload.strikes?.length) {
         srContent.innerHTML = '<div class="empty-state">No option-chain data for this date.</div>';
