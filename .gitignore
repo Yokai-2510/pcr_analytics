@@ -1,0 +1,22 @@
+# ── Python ──
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+
+# ── Backend runtime secrets & data — NEVER commit ──
+backend/source/configs.json
+backend/source/credentials*.json
+backend/source/user_prefs.json
+backend/source/*.pem
+backend/data/
+backend/logs/
+backend/research_exports/
+
+# ── Keys / credentials anywhere ──
+*.pem
+credentials*.json
+
+# ── OS junk ──
+.DS_Store
+Thumbs.db
