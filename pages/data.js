@@ -86,7 +86,7 @@ let selectedCols = [];
 let filters = [];
 let searchQuery = '';
 let resampleInterval = 'raw';
-let activeTab = 'oi-analytics'; // 'oi-analytics' | 'oi-logs' | 'volume-logs' | 'entry-signals' | 'all-logs'
+let activeTab = 'oi-analytics'; // 'oi-analytics' | 'oi-logs' | 'volume-logs' | 'oi-change-logs' | 'all-logs'
 let pollTimer = null;
 
 // Per-tab instrument/date state so each tab remembers its own selection
@@ -95,7 +95,8 @@ const tabState = {
   'oi-logs':      { instrument: 'nifty', date: new Date().toISOString().slice(0, 10) },
   'volume-logs':  { instrument: 'nifty', date: new Date().toISOString().slice(0, 10) },
   'sr':           { instrument: 'nifty', date: new Date().toISOString().slice(0, 10) },
-  'entry-signals':   { instrument: 'nifty', date: new Date().toISOString().slice(0, 10) },
+  'oi-change-logs':   { instrument: 'nifty', date: new Date().toISOString().slice(0, 10) },
+  'entry-signals':    { instrument: 'nifty', date: new Date().toISOString().slice(0, 10) },
   'all-logs':     { instrument: 'nifty', date: new Date().toISOString().slice(0, 10) },
 };
 
@@ -162,6 +163,7 @@ export async function mount(container) {
     { id: 'oi-logs', label: 'OI Logs' },
     { id: 'volume-logs', label: 'Volume Logs' },
     { id: 'sr', label: 'S/R' },
+    { id: 'oi-change-logs', label: 'OI Change Logs' },
     { id: 'entry-signals', label: 'Entry Signals' },
     { id: 'all-logs', label: 'All Logs' },
   ];
@@ -181,6 +183,7 @@ export async function mount(container) {
   const oiLogsPanel = el('div', { class: 'tab-panel' });
   const volumeLogsPanel = el('div', { class: 'tab-panel' });
   const srPanel = el('div', { class: 'tab-panel' });
+  const oiChangeLogsPanel = el('div', { class: 'tab-panel' });
   const entrySignalsPanel = el('div', { class: 'tab-panel' });
   const allLogsPanel = el('div', { class: 'tab-panel' });
 
@@ -188,6 +191,7 @@ export async function mount(container) {
   page.appendChild(oiLogsPanel);
   page.appendChild(volumeLogsPanel);
   page.appendChild(srPanel);
+  page.appendChild(oiChangeLogsPanel);
   page.appendChild(entrySignalsPanel);
   page.appendChild(allLogsPanel);
 
@@ -215,6 +219,7 @@ export async function mount(container) {
         else if (tabId === 'oi-logs') renderOiLogs();
         else if (tabId === 'volume-logs') renderVolumeLogs();
         else if (tabId === 'sr') renderSR();
+        else if (tabId === 'oi-change-logs') renderOiChangeLogs();
         else if (tabId === 'entry-signals') renderEntrySignals();
       },
     });
@@ -229,6 +234,7 @@ export async function mount(container) {
         else if (tabId === 'oi-logs') renderOiLogs();
         else if (tabId === 'volume-logs') renderVolumeLogs();
         else if (tabId === 'sr') renderSR();
+        else if (tabId === 'oi-change-logs') renderOiChangeLogs();
         else if (tabId === 'entry-signals') renderEntrySignals();
       },
       placeholder: 'All dates',
@@ -255,6 +261,7 @@ export async function mount(container) {
     oiLogsPanel.style.display = tabId === 'oi-logs' ? '' : 'none';
     volumeLogsPanel.style.display = tabId === 'volume-logs' ? '' : 'none';
     srPanel.style.display = tabId === 'sr' ? '' : 'none';
+    oiChangeLogsPanel.style.display = tabId === 'oi-change-logs' ? '' : 'none';
     entrySignalsPanel.style.display = tabId === 'entry-signals' ? '' : 'none';
     allLogsPanel.style.display = tabId === 'all-logs' ? '' : 'none';
     if (tabId === 'all-logs') renderBody();
@@ -262,6 +269,7 @@ export async function mount(container) {
     else if (tabId === 'oi-logs') renderOiLogs();
     else if (tabId === 'volume-logs') renderVolumeLogs();
     else if (tabId === 'sr') renderSR();
+    else if (tabId === 'oi-change-logs') renderOiChangeLogs();
     else if (tabId === 'entry-signals') renderEntrySignals();
   }
 
@@ -591,13 +599,16 @@ export async function mount(container) {
     });
     const summaryRows = [...timeMap.values()].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
 
-    // Build timestamp -> oi_difference lookup (per-minute floor matches computed_ticks)
+    // Build minute -> oi_difference lookup. Volume rows are now at 15s
+    // (un-floored, e.g. 09:15:30) while computed_ticks sit on :00 minute
+    // boundaries, so key by the minute prefix (first 16 chars) and every
+    // 15s volume row in that minute maps to the minute's OI diff.
     const ticksArr = Array.isArray(ticksRaw) ? ticksRaw : (ticksRaw.ticks || ticksRaw.data || ticksRaw.rows || []);
     const oiDiffByTs = new Map();
     for (const t of ticksArr) {
       const ts = t.timestamp;
       if (!ts || t.oi_difference == null) continue;
-      oiDiffByTs.set(ts, t.oi_difference);
+      oiDiffByTs.set(ts.slice(0, 16), t.oi_difference);
     }
     return { summaryRows, oiDiffByTs };
   }
@@ -628,7 +639,11 @@ export async function mount(container) {
     const out = [];
     let ceCum = 0, peCum = 0;
     let prevVolDiff = null;
-    let prevOiDiff = null;
+    // OI ROC is a 1-minute metric; track it minute-over-minute and carry the
+    // value across the four 15s volume rows that share a minute.
+    let prevMinuteOiDiff = null;
+    let lastOiMinute = null;
+    let carriedOiRoc = null;
     for (let i = 0; i < summaryRows.length; i++) {
       const r = summaryRows[i];
       const ceVol = r.total_ce_volume || 0;
@@ -636,17 +651,24 @@ export async function mount(container) {
       ceCum += ceVol;
       peCum += peVol;
       const volDiff = peCum - ceCum;
-      // Volume Difference ROC
+      // Volume Difference ROC (15s-over-15s)
       let volRoc = null;
       if (prevVolDiff !== null && Math.abs(prevVolDiff) > 0) {
         volRoc = (volDiff - prevVolDiff) / Math.abs(prevVolDiff) * 100;
       }
-      // OI Difference ROC (from computed_ticks.oi_difference = PE_cumm - CE_cumm)
-      const oiDiff = (oiDiffByTs && oiDiffByTs.has(r.timestamp)) ? oiDiffByTs.get(r.timestamp) : null;
-      let oiRoc = null;
-      if (oiDiff !== null && prevOiDiff !== null && Math.abs(prevOiDiff) > 0) {
-        oiRoc = (oiDiff - prevOiDiff) / Math.abs(prevOiDiff) * 100;
+      // OI Difference ROC (from computed_ticks.oi_difference = PE_cumm - CE_cumm).
+      // Key by minute prefix since volume rows are 15s and OI ticks are :00.
+      const oiKey = typeof r.timestamp === 'string' ? r.timestamp.slice(0, 16) : r.timestamp;
+      const oiDiff = (oiDiffByTs && oiDiffByTs.has(oiKey)) ? oiDiffByTs.get(oiKey) : null;
+      if (oiKey !== lastOiMinute) {
+        // New minute — recompute OI ROC vs the previous minute's OI diff
+        carriedOiRoc = (oiDiff !== null && prevMinuteOiDiff !== null && Math.abs(prevMinuteOiDiff) > 0)
+          ? (oiDiff - prevMinuteOiDiff) / Math.abs(prevMinuteOiDiff) * 100
+          : null;
+        if (oiDiff !== null) prevMinuteOiDiff = oiDiff;
+        lastOiMinute = oiKey;
       }
+      const oiRoc = carriedOiRoc;
       let crossover = '';
       if (prevVolDiff !== null) {
         if (prevVolDiff < 0 && volDiff >= 0) crossover = 'PE Cross Up';
@@ -664,7 +686,6 @@ export async function mount(container) {
         crossover, trend, alert, confidence,
       });
       prevVolDiff = volDiff;
-      if (oiDiff !== null) prevOiDiff = oiDiff;
     }
     return out;
   }
@@ -1099,17 +1120,17 @@ export async function mount(container) {
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   // ENTRY SIGNALS TAB
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  const entrySignalsContent = el('div');
-  buildTabToolbar(entrySignalsPanel, 'entry-signals', (controls) => {
-    const esExportBtn = el('button', { class: 'btn secondary sm', onclick: exportEntrySignalsCSV }, 'Export CSV');
+  const oiChangeLogsContent = el('div');
+  buildTabToolbar(oiChangeLogsPanel, 'oi-change-logs', (controls) => {
+    const esExportBtn = el('button', { class: 'btn secondary sm', onclick: exportOiChangeLogsCSV }, 'Export CSV');
     controls.append(el('div', { class: 'spacer' }), esExportBtn);
   });
-  entrySignalsPanel.appendChild(entrySignalsContent);
+  oiChangeLogsPanel.appendChild(oiChangeLogsContent);
 
-  async function exportEntrySignalsCSV() {
-    const ts = tabState['entry-signals'];
+  async function exportOiChangeLogsCSV() {
+    const ts = tabState['oi-change-logs'];
     if (!ts.instrument || !ts.date) { toast('Select instrument and date first', 'error'); return; }
-    toast('Exporting entry signals…', 'info');
+    toast('Exporting OI change logs…', 'info');
     try {
       const data = await api.computedTicks(ts.instrument, ts.date);
       const rawTicks = Array.isArray(data) ? data : (data.ticks || data.data || data.rows || []);
@@ -1152,7 +1173,7 @@ export async function mount(container) {
       const blob = new Blob([csvRows.join('\n')], { type: 'text/csv' });
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
-      a.download = `entry-signals-${ts.instrument}-${ts.date}.csv`;
+      a.download = `oi-change-logs-${ts.instrument}-${ts.date}.csv`;
       a.click();
       URL.revokeObjectURL(a.href);
       toast(`Exported ${ticks.length} rows`, 'success');
@@ -1161,11 +1182,11 @@ export async function mount(container) {
     }
   }
 
-  async function renderEntrySignals(silent = false) {
-    if (!silent) entrySignalsContent.innerHTML = '<div class="dim" style="padding:24px">Loading entry signals…</div>';
-    const ts = tabState['entry-signals'];
+  async function renderOiChangeLogs(silent = false) {
+    if (!silent) oiChangeLogsContent.innerHTML = '<div class="dim" style="padding:24px">Loading OI change logs…</div>';
+    const ts = tabState['oi-change-logs'];
     if (!ts.instrument || !ts.date) {
-      entrySignalsContent.innerHTML = '<div class="empty-state">Select a date to view entry signals.</div>';
+      oiChangeLogsContent.innerHTML = '<div class="empty-state">Select a date to view OI Change Logs.</div>';
       return;
     }
     try {
@@ -1173,7 +1194,7 @@ export async function mount(container) {
       const rawTicks = Array.isArray(data) ? data : (data.ticks || data.data || data.rows || []);
       const ticks = filterMarketHours(rawTicks);
       if (!ticks.length) {
-        entrySignalsContent.innerHTML = '<div class="empty-state">No computed ticks for this date.</div>';
+        oiChangeLogsContent.innerHTML = '<div class="empty-state">No computed ticks for this date.</div>';
         return;
       }
       // ── Fill null ce/pe_oi_change from cumulative diffs ──
@@ -1200,7 +1221,7 @@ export async function mount(container) {
       // Reverse chronological (latest at top)
       const rows = [...ticks].reverse();
 
-      entrySignalsContent.innerHTML = '';
+      oiChangeLogsContent.innerHTML = '';
 
       // Summary strip
       const latest = rows[0];
@@ -1226,7 +1247,7 @@ export async function mount(container) {
           el('div', { class: 'mono', style: { fontWeight: '600', fontSize: '16px', color: 'var(--accent)' } }, String(crossoverCount)),
         ),
       );
-      entrySignalsContent.appendChild(summaryStrip);
+      oiChangeLogsContent.appendChild(summaryStrip);
 
       // Pre-compute display values so sorting is just (re)arranging an array.
       const computed = rows.map(r => {
@@ -1284,8 +1305,172 @@ export async function mount(container) {
       ];
 
       const t = buildSortableTable(cols, computed);
-      entrySignalsContent.appendChild(el('div', { class: 'data-grid-wrap' }, t));
+      oiChangeLogsContent.appendChild(el('div', { class: 'data-grid-wrap' }, t));
 
+    } catch (e) {
+      if (!silent) oiChangeLogsContent.innerHTML = `<div class="empty-state"><span class="bear">Failed</span><span class="text-xs mono dim">${e.message}</span></div>`;
+    }
+  }
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // ENTRY SIGNALS TAB — the actual trade triggers, OI + Volume merged
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // One chronological feed of every entry trigger the trade engine sees,
+  // tagged by source. Direction → leg is fixed: BUY → CE, SELL → PE.
+  //   OI source     — computed_ticks crossovers (signal BUY/SELL)
+  //   Volume source — running-cumulative volume-diff sign flips, identical
+  //                   to the Volume Logs "CE/PE Volume Crossover" column
+  // A trigger is "Confirmed" when the other source fired the same direction
+  // within ±5 min — i.e. where the 'combined' signal_mode would enter.
+  const CONFIRM_WINDOW_MS = 5 * 60 * 1000;
+  const entrySignalsContent = el('div');
+  buildTabToolbar(entrySignalsPanel, 'entry-signals', (controls) => {
+    const exportBtn = el('button', { class: 'btn secondary sm', onclick: exportEntrySignalsCSV }, 'Export CSV');
+    controls.append(el('div', { class: 'spacer' }), exportBtn);
+  });
+  entrySignalsPanel.appendChild(entrySignalsContent);
+
+  async function _buildEntrySignals(instrument, date) {
+    const [oiRaw, vData] = await Promise.all([
+      api.computedTicks(instrument, date).catch(() => []),
+      _fetchVolumeData(instrument, date).catch(() => null),
+    ]);
+    const ticks = filterMarketHours(Array.isArray(oiRaw) ? oiRaw : (oiRaw.ticks || oiRaw.data || oiRaw.rows || []));
+    const oiEvents = ticks
+      .filter(t => { const s = (t.signal || '').toUpperCase(); return s === 'BUY' || s === 'SELL'; })
+      .map(t => ({
+        timestamp: t.timestamp,
+        source: 'OI',
+        signal: (t.signal || '').toUpperCase(),
+        metricLabel: 'OI Diff',
+        metricValue: t.oi_difference ?? null,
+      }));
+    const vMetrics = vData ? _computeVolumeMetrics(vData.summaryRows, vData.oiDiffByTs) : [];
+    const volEvents = vMetrics
+      .filter(m => m.crossover)
+      .map(m => ({
+        timestamp: m.timestamp,
+        source: 'Volume',
+        signal: m.crossover === 'PE Cross Up' ? 'BUY' : 'SELL',
+        metricLabel: 'Vol Diff',
+        metricValue: m.volDiff,
+      }));
+    const events = [...oiEvents, ...volEvents];
+    // Mark confirmation: opposite source, same direction, within the window
+    events.forEach(e => {
+      const t = new Date(e.timestamp).getTime();
+      e.confirmed = events.some(o =>
+        o.source !== e.source &&
+        o.signal === e.signal &&
+        Math.abs(new Date(o.timestamp).getTime() - t) <= CONFIRM_WINDOW_MS);
+      e.side = e.signal === 'BUY' ? 'CE' : 'PE';
+    });
+    events.sort((a, b) => String(a.timestamp).localeCompare(String(b.timestamp)));
+    return events;
+  }
+
+  async function exportEntrySignalsCSV() {
+    const ts = tabState['entry-signals'];
+    if (!ts.instrument || !ts.date) { toast('Select instrument and date first', 'error'); return; }
+    toast('Exporting entry signals…', 'info');
+    try {
+      const events = await _buildEntrySignals(ts.instrument, ts.date);
+      if (!events.length) { toast('No entry signals to export', 'error'); return; }
+      const headers = ['Time', 'Source', 'Signal', 'Side', 'Metric', 'Metric_Value', 'Confirmed'];
+      const csvRows = [headers.join(',')];
+      for (const e of events) {
+        csvRows.push([
+          e.timestamp, e.source, e.signal, e.side, e.metricLabel,
+          e.metricValue ?? '', e.confirmed ? 'YES' : 'NO',
+        ].join(','));
+      }
+      const blob = new Blob([csvRows.join('\n')], { type: 'text/csv' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `entry-signals-${ts.instrument}-${ts.date}.csv`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+      toast(`Exported ${events.length} rows`, 'success');
+    } catch (e) {
+      toast('Export failed: ' + e.message, 'error');
+    }
+  }
+
+  async function renderEntrySignals(silent = false) {
+    if (!silent) entrySignalsContent.innerHTML = '<div class="dim" style="padding:24px">Loading entry signals…</div>';
+    const ts = tabState['entry-signals'];
+    if (!ts.instrument || !ts.date) {
+      entrySignalsContent.innerHTML = '<div class="empty-state">Select a date to view Entry Signals.</div>';
+      return;
+    }
+    try {
+      const events = await _buildEntrySignals(ts.instrument, ts.date);
+      if (!events.length) {
+        entrySignalsContent.innerHTML = '<div class="empty-state">No entry signals for this date.</div>';
+        return;
+      }
+      const oiCount = events.filter(e => e.source === 'OI').length;
+      const volCount = events.filter(e => e.source === 'Volume').length;
+      const confirmedCount = events.filter(e => e.confirmed).length;
+      const latest = events[events.length - 1];
+
+      const summaryStrip = el('div', { class: 'card', style: { display: 'flex', gap: '28px', alignItems: 'center', flexWrap: 'wrap', padding: '14px 20px', marginBottom: '16px' } },
+        el('div', {},
+          el('span', { class: 'text-xs muted' }, 'Total Triggers'),
+          el('div', { class: 'mono', style: { fontWeight: '700', fontSize: '16px' } }, String(events.length)),
+        ),
+        el('div', { style: { borderLeft: '1px solid var(--border)', paddingLeft: '20px' } },
+          el('span', { class: 'text-xs muted' }, 'OI Signals'),
+          el('div', { class: 'mono', style: { fontWeight: '700', fontSize: '16px', color: 'var(--accent)' } }, String(oiCount)),
+        ),
+        el('div', { style: { borderLeft: '1px solid var(--border)', paddingLeft: '20px' } },
+          el('span', { class: 'text-xs muted' }, 'Volume Signals'),
+          el('div', { class: 'mono', style: { fontWeight: '700', fontSize: '16px', color: '#c6c0ff' } }, String(volCount)),
+        ),
+        el('div', { style: { borderLeft: '1px solid var(--border)', paddingLeft: '20px' } },
+          el('span', { class: 'text-xs muted' }, 'Confirmed (combined)'),
+          el('div', { class: 'mono bull', style: { fontWeight: '700', fontSize: '16px' } }, String(confirmedCount)),
+        ),
+        el('div', { style: { borderLeft: '1px solid var(--border)', paddingLeft: '20px' } },
+          el('span', { class: 'text-xs muted' }, 'Latest'),
+          el('div', {}, el('span', { class: `change-pill ${latest.signal === 'BUY' ? 'bull' : 'bear'}`, style: { fontSize: '10px' } }, `${latest.signal} ${latest.side}`)),
+        ),
+      );
+
+      // Latest at top
+      const rows = [...events].reverse().map(e => ({
+        ...e,
+        sourceRank: e.source === 'OI' ? 1 : 0,
+        signalRank: e.signal === 'BUY' ? 1 : -1,
+        confirmedRank: e.confirmed ? 1 : 0,
+      }));
+
+      const cols = [
+        { key: 'timestamp', label: 'Time', render: r => el('td', { class: 'mono' }, fmtTimeIST(r.timestamp)) },
+        { key: 'sourceRank', label: 'Source', render: r => {
+          const tone = r.source === 'OI' ? 'neutral' : 'neutral';
+          const color = r.source === 'OI' ? 'var(--accent)' : '#c6c0ff';
+          return el('td', {}, el('span', { class: 'change-pill', style: { fontSize: '10px', fontWeight: '700', color, borderColor: color } }, r.source));
+        } },
+        { key: 'signalRank', label: 'Signal', render: r =>
+          el('td', {}, el('span', { class: `change-pill ${r.signal === 'BUY' ? 'bull' : 'bear'}`, style: { fontSize: '10px', fontWeight: '700' } }, r.signal)) },
+        { key: 'side', label: 'Side', render: r =>
+          el('td', { class: `mono ${r.side === 'CE' ? 'bull' : 'bear'}`, style: { fontWeight: '600' } }, r.side) },
+        { key: 'metricValue', label: 'Driving Metric', render: r => {
+          if (r.metricValue == null) return el('td', { class: 'mono dim' }, `${r.metricLabel}: —`);
+          const tone = r.metricValue >= 0 ? 'bull' : 'bear';
+          return el('td', { class: `mono ${tone}` }, `${r.metricLabel}: ${(r.metricValue >= 0 ? '+' : '') + fmtCompact(r.metricValue)}`);
+        } },
+        { key: 'confirmedRank', label: 'Confirmed', render: r =>
+          r.confirmed
+            ? el('td', {}, el('span', { class: 'change-pill bull', style: { fontSize: '10px', fontWeight: '700' } }, '✓ both'))
+            : el('td', { class: 'mono dim' }, '—') },
+      ];
+
+      const t = buildSortableTable(cols, rows);
+      entrySignalsContent.innerHTML = '';
+      entrySignalsContent.appendChild(summaryStrip);
+      entrySignalsContent.appendChild(el('div', { class: 'data-grid-wrap' }, t));
     } catch (e) {
       if (!silent) entrySignalsContent.innerHTML = `<div class="empty-state"><span class="bear">Failed</span><span class="text-xs mono dim">${e.message}</span></div>`;
     }
@@ -1667,6 +1852,7 @@ export async function mount(container) {
     else if (activeTab === 'oi-logs') renderOiLogs(true);
     else if (activeTab === 'volume-logs') renderVolumeLogs(true);
     else if (activeTab === 'sr') renderSR(true);
+    else if (activeTab === 'oi-change-logs') renderOiChangeLogs(true);
     else if (activeTab === 'entry-signals') renderEntrySignals(true);
   }, 60000);
 }
