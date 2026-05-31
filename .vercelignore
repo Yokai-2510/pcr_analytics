@@ -1,0 +1,5 @@
+# Keep the Python backend in the repo (as a backup) but OUT of the Vercel
+# static deployment — otherwise backend/*.py is served as downloadable text
+# at https://<app>.vercel.app/backend/...
+backend/
+*.py
