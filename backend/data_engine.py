@@ -135,15 +135,16 @@ def compute_tick(
             signed_pcr = pe_oi_change / abs(ce_oi_change)
 
     # Signal logic, in order:
-    #   - First tick of session (no prev_tick): no signal — we have no
-    #     comparison point yet.
+    #   - First tick of session (no prev_tick): no signal — the OI diff/change
+    #     isn't available yet at 09:15:00.
     #   - Within ~1 minute of market_close_time: don't open new positions;
     #     if a BUY is currently open, force a SELL so the day never ends long.
-    #   - Second tick of session (no signal recorded yet today): forced BUY.
-    #     This is the "first entry" the strategy always takes.
-    #   - Subsequent ticks: alternate strictly with position state — only fire
-    #     SELL if currently BUY, only fire BUY if currently SELL — so the
-    #     sequence is BUY → SELL → BUY → SELL.
+    #   - First valid tick of session (09:16, first time the OI diff exists):
+    #     enter the side that MATCHES THE SIGN of the OI diff — diff > 0
+    #     (PE building faster) → BUY/CE, diff < 0 (CE building faster) →
+    #     SELL/PE. diff == 0 → wait for the next tick. (Not a forced long.)
+    #   - Subsequent ticks: flip on a sign crossover — fire SELL only if
+    #     currently BUY, BUY only if currently SELL.
     signal = None
     crossover = 0
     position = _current_session_position(instrument, date)
@@ -153,8 +154,13 @@ def compute_tick(
                 signal = "SELL"
                 crossover = 1
         elif position is None:
-            signal = "BUY"
-            crossover = 1
+            # First entry of the day — direction = sign of the OI diff
+            if oi_difference > 0:
+                signal = "BUY"
+                crossover = 1
+            elif oi_difference < 0:
+                signal = "SELL"
+                crossover = 1
         else:
             prev_oi_diff = utils.safe_float(prev_tick.get("oi_difference"))
             if prev_oi_diff is not None:
@@ -437,8 +443,13 @@ def recompute_signals_for_date(instrument: str, date: str) -> dict[str, int]:
                     signal = "SELL"
                     crossover = 1
             elif position is None:
-                signal = "BUY"
-                crossover = 1
+                # First entry of the day — direction = sign of the OI diff
+                if oi_diff > 0:
+                    signal = "BUY"
+                    crossover = 1
+                elif oi_diff < 0:
+                    signal = "SELL"
+                    crossover = 1
             elif prev_oi_diff is not None:
                 if position == "SELL" and prev_oi_diff <= 0 and oi_diff > 0:
                     signal = "BUY"
