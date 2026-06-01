@@ -80,6 +80,14 @@ function buildSortableTable(cols, rows) {
 import { api } from '../api.js';
 import { store } from '../store.js';
 
+// Map a raw crossover signal to the user-facing label + tone.
+// BUY = buy a CALL (bullish, green); SELL = buy a PUT (bearish, red).
+function crossoverLabel(sig) {
+  if (sig === 'BUY') return 'BUY CALL';
+  if (sig === 'SELL') return 'BUY PUT';
+  return sig || '—';
+}
+
 // ── State ──────────────────────────────────────────────────────────────
 let columnsCatalog = null;
 let selectedCols = [];
@@ -1278,8 +1286,7 @@ export async function mount(container) {
         { key: 'signalRank', label: 'Signal',
           render: r => {
             const tone = r.signal === 'BUY' ? 'bull' : r.signal === 'SELL' ? 'bear' : 'neutral';
-            const label = r.signal || '—';
-            return el('td', {}, el('span', { class: `change-pill ${tone}`, style: { fontSize: '10px' } }, label));
+            return el('td', {}, el('span', { class: `change-pill ${tone}`, style: { fontSize: '10px' } }, crossoverLabel(r.signal)));
           },
           // Click on Signal to keep only BUY/SELL rows in chronological order
           // — the data_engine enforces strict alternation so they naturally
@@ -1433,7 +1440,7 @@ export async function mount(container) {
         ),
         el('div', { style: { borderLeft: '1px solid var(--border)', paddingLeft: '20px' } },
           el('span', { class: 'text-xs muted' }, 'Latest'),
-          el('div', {}, el('span', { class: `change-pill ${latest.signal === 'BUY' ? 'bull' : 'bear'}`, style: { fontSize: '10px' } }, `${latest.signal} ${latest.side}`)),
+          el('div', {}, el('span', { class: `change-pill ${latest.signal === 'BUY' ? 'bull' : 'bear'}`, style: { fontSize: '10px' } }, crossoverLabel(latest.signal))),
         ),
       );
 
@@ -1453,7 +1460,7 @@ export async function mount(container) {
           return el('td', {}, el('span', { class: 'change-pill', style: { fontSize: '10px', fontWeight: '700', color, borderColor: color } }, r.source));
         } },
         { key: 'signalRank', label: 'Signal', render: r =>
-          el('td', {}, el('span', { class: `change-pill ${r.signal === 'BUY' ? 'bull' : 'bear'}`, style: { fontSize: '10px', fontWeight: '700' } }, r.signal)) },
+          el('td', {}, el('span', { class: `change-pill ${r.signal === 'BUY' ? 'bull' : 'bear'}`, style: { fontSize: '10px', fontWeight: '700' } }, crossoverLabel(r.signal))) },
         { key: 'side', label: 'Side', render: r =>
           el('td', { class: `mono ${r.side === 'CE' ? 'bull' : 'bear'}`, style: { fontWeight: '600' } }, r.side) },
         { key: 'metricValue', label: 'Driving Metric', render: r => {
