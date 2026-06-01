@@ -147,7 +147,7 @@ def compute_tick(
     #     currently BUY, BUY only if currently SELL.
     signal = None
     crossover = 0
-    position = _current_session_position(instrument, date)
+    position = _current_session_position(instrument, date, before_ts=timestamp)
     if prev_tick is not None and oi_difference is not None:
         if _is_last_session_tick(timestamp):
             if position == "BUY":
@@ -196,18 +196,26 @@ def compute_tick(
     }
 
 
-def _current_session_position(instrument: str, date: str) -> str | None:
+def _current_session_position(
+    instrument: str, date: str, before_ts: str | None = None
+) -> str | None:
     """Return the most recent non-null signal for (instrument, date) — i.e. the
-    position currently held. None if no signal has fired today yet."""
+    position currently held. None if no signal has fired today yet.
+
+    before_ts excludes the minute currently being (re)computed so a recompute
+    of minute T never reads T's own signal as the prior position — which would
+    break flip detection and clobber the signal."""
+    query = (
+        "SELECT signal FROM computed_ticks "
+        "WHERE instrument = ? AND substr(timestamp, 1, 10) = ? AND signal IS NOT NULL"
+    )
+    params: list[Any] = [instrument, date]
+    if before_ts:
+        query += " AND timestamp < ?"
+        params.append(before_ts)
+    query += " ORDER BY timestamp DESC LIMIT 1"
     with data_processor.connect() as conn:
-        row = conn.execute(
-            """
-            SELECT signal FROM computed_ticks
-            WHERE instrument = ? AND substr(timestamp, 1, 10) = ? AND signal IS NOT NULL
-            ORDER BY timestamp DESC LIMIT 1
-            """,
-            (instrument, date),
-        ).fetchone()
+        row = conn.execute(query, tuple(params)).fetchone()
     return row["signal"] if row else None
 
 
@@ -295,18 +303,25 @@ def get_baseline_rows(instrument: str, date: str, baseline_type: str = "post_set
         return [dict(r) for r in rows]
 
 
-def get_prev_computed_tick(instrument: str, date: str) -> dict[str, Any] | None:
-    """Get the most recent computed tick for signal/crossover detection."""
+def get_prev_computed_tick(
+    instrument: str, date: str, before_ts: str | None = None
+) -> dict[str, Any] | None:
+    """Get the most recent computed tick for signal/crossover detection.
+
+    before_ts excludes the minute currently being (re)computed: without it, a
+    recompute of minute T returns T itself as its own 'previous' tick, so the
+    sign-flip vs T-1 is lost and the signal gets clobbered to None."""
+    query = (
+        "SELECT * FROM computed_ticks "
+        "WHERE instrument = ? AND substr(timestamp, 1, 10) = ?"
+    )
+    params: list[Any] = [instrument, date]
+    if before_ts:
+        query += " AND timestamp < ?"
+        params.append(before_ts)
+    query += " ORDER BY timestamp DESC LIMIT 1"
     with data_processor.connect() as conn:
-        row = conn.execute(
-            """
-            SELECT * FROM computed_ticks
-            WHERE instrument = ? AND substr(timestamp, 1, 10) = ?
-            ORDER BY timestamp DESC
-            LIMIT 1
-            """,
-            (instrument, date),
-        ).fetchone()
+        row = conn.execute(query, tuple(params)).fetchone()
         return dict(row) if row else None
 
 
@@ -369,7 +384,10 @@ def run_compute_cycle(date: str | None = None) -> dict[str, Any]:
                 continue
 
             baseline_rows = get_baseline_rows(instrument, today)
-            prev_tick = get_prev_computed_tick(instrument, today)
+            # Exclude the minute we're about to (re)compute so prev_tick is
+            # always the genuinely-prior minute — makes recompute idempotent.
+            current_min = _floor_to_minute(raw_rows[0].get("timestamp"))
+            prev_tick = get_prev_computed_tick(instrument, today, before_ts=current_min)
 
             tick = compute_tick(
                 instrument=instrument,
