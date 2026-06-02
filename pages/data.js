@@ -94,7 +94,7 @@ let selectedCols = [];
 let filters = [];
 let searchQuery = '';
 let resampleInterval = 'raw';
-let activeTab = 'oi-analytics'; // 'oi-analytics' | 'oi-logs' | 'volume-logs' | 'oi-change-logs' | 'all-logs'
+let activeTab = 'volume-logs'; // 'volume-logs' | 'sr' | 'oi-change-logs' | 'entry-signals'
 let pollTimer = null;
 
 // Per-tab instrument/date state so each tab remembers its own selection
@@ -167,13 +167,10 @@ export async function mount(container) {
   // ── Top-level Tab bar ──
   const tabBar = el('div', { class: 'tabs', style: { marginBottom: '12px' } });
   const tabs = [
-    { id: 'oi-analytics', label: 'OI Analytics' },
-    { id: 'oi-logs', label: 'OI Logs' },
     { id: 'volume-logs', label: 'Volume Logs' },
     { id: 'sr', label: 'S/R' },
     { id: 'oi-change-logs', label: 'OI Change Logs' },
     { id: 'entry-signals', label: 'Entry Signals' },
-    { id: 'all-logs', label: 'All Logs' },
   ];
   const tabEls = {};
   tabs.forEach(t => {
@@ -195,13 +192,13 @@ export async function mount(container) {
   const entrySignalsPanel = el('div', { class: 'tab-panel' });
   const allLogsPanel = el('div', { class: 'tab-panel' });
 
-  page.appendChild(oiAnalyticsPanel);
-  page.appendChild(oiLogsPanel);
+  // Only the four kept tabs are mounted. The OI Analytics / OI Logs / All Logs
+  // panels are still constructed below (their build code is inert when not
+  // appended) but are intentionally not shown.
   page.appendChild(volumeLogsPanel);
   page.appendChild(srPanel);
   page.appendChild(oiChangeLogsPanel);
   page.appendChild(entrySignalsPanel);
-  page.appendChild(allLogsPanel);
 
   // ── State ──
   let currentResult = null;
@@ -222,10 +219,7 @@ export async function mount(container) {
         ts.instrument = v;
         ts.date = new Date().toISOString().slice(0, 10);
         dateSelect.refresh(v);
-        if (tabId === 'all-logs') { state.page = 1; runQuery(); }
-        else if (tabId === 'oi-analytics') renderOiAnalytics();
-        else if (tabId === 'oi-logs') renderOiLogs();
-        else if (tabId === 'volume-logs') renderVolumeLogs();
+        if (tabId === 'volume-logs') renderVolumeLogs();
         else if (tabId === 'sr') renderSR();
         else if (tabId === 'oi-change-logs') renderOiChangeLogs();
         else if (tabId === 'entry-signals') renderEntrySignals();
@@ -237,10 +231,7 @@ export async function mount(container) {
       apiDistinctFn: fetchAvailableDates,
       onChange: v => {
         ts.date = v;
-        if (tabId === 'all-logs') { state.page = 1; runQuery(); }
-        else if (tabId === 'oi-analytics') renderOiAnalytics();
-        else if (tabId === 'oi-logs') renderOiLogs();
-        else if (tabId === 'volume-logs') renderVolumeLogs();
+        if (tabId === 'volume-logs') renderVolumeLogs();
         else if (tabId === 'sr') renderSR();
         else if (tabId === 'oi-change-logs') renderOiChangeLogs();
         else if (tabId === 'entry-signals') renderEntrySignals();
@@ -265,17 +256,11 @@ export async function mount(container) {
   function switchTab(tabId) {
     activeTab = tabId;
     Object.entries(tabEls).forEach(([id, btn]) => btn.classList.toggle('active', id === tabId));
-    oiAnalyticsPanel.style.display = tabId === 'oi-analytics' ? '' : 'none';
-    oiLogsPanel.style.display = tabId === 'oi-logs' ? '' : 'none';
     volumeLogsPanel.style.display = tabId === 'volume-logs' ? '' : 'none';
     srPanel.style.display = tabId === 'sr' ? '' : 'none';
     oiChangeLogsPanel.style.display = tabId === 'oi-change-logs' ? '' : 'none';
     entrySignalsPanel.style.display = tabId === 'entry-signals' ? '' : 'none';
-    allLogsPanel.style.display = tabId === 'all-logs' ? '' : 'none';
-    if (tabId === 'all-logs') renderBody();
-    else if (tabId === 'oi-analytics') renderOiAnalytics();
-    else if (tabId === 'oi-logs') renderOiLogs();
-    else if (tabId === 'volume-logs') renderVolumeLogs();
+    if (tabId === 'volume-logs') renderVolumeLogs();
     else if (tabId === 'sr') renderSR();
     else if (tabId === 'oi-change-logs') renderOiChangeLogs();
     else if (tabId === 'entry-signals') renderEntrySignals();
@@ -639,13 +624,17 @@ export async function mount(container) {
     return (trend === 'Strong' || trend === 'Very Strong') ? 'High' : 'Low';
   }
 
-  // Build the per-row institutional volume metrics in ascending time order.
-  // The backend's total_ce_volume / total_pe_volume are the per-minute
-  // volumes summed across strikes (the broker reports per-tick volume per
-  // strike, not running totals). Cumulative is summed in JS from market open.
+  // Build the per-row volume metrics in ascending time order.
+  //
+  // get_total_volume_series returns the cross-strike DAY-CUMULATIVE CE/PE
+  // volume at each 15s fetch (total_ce_volume = CEcum(t), monotonic). So:
+  //   per-tick (15s) volume  = CEcum(t) - CEcum(t-1)      ← "CE Vol"
+  //   cumulative volume      = CEcum(t)                   ← "CE Vol Cum"
+  //   volume diff (single)   = PEcum(t) - CEcum(t)        ← "Vol Diff (PE-CE)"
+  // Crossover = sign flip of that single cumulative diff (sampling-independent).
   function _computeVolumeMetrics(summaryRows, oiDiffByTs) {
     const out = [];
-    let ceCum = 0, peCum = 0;
+    let prevCeCum = null, prevPeCum = null;
     let prevVolDiff = null;
     // OI ROC is a 1-minute metric; track it minute-over-minute and carry the
     // value across the four 15s volume rows that share a minute.
@@ -654,11 +643,12 @@ export async function mount(container) {
     let carriedOiRoc = null;
     for (let i = 0; i < summaryRows.length; i++) {
       const r = summaryRows[i];
-      const ceVol = r.total_ce_volume || 0;
-      const peVol = r.total_pe_volume || 0;
-      ceCum += ceVol;
-      peCum += peVol;
-      const volDiff = peCum - ceCum;
+      const ceCum = r.total_ce_volume || 0;   // day-cumulative CE volume
+      const peCum = r.total_pe_volume || 0;   // day-cumulative PE volume
+      // Per-tick (incremental) volume traded in this 15s window
+      const ceVol = prevCeCum !== null ? Math.max(0, ceCum - prevCeCum) : ceCum;
+      const peVol = prevPeCum !== null ? Math.max(0, peCum - prevPeCum) : peCum;
+      const volDiff = peCum - ceCum;          // single cumulative diff
       // Volume Difference ROC (15s-over-15s)
       let volRoc = null;
       if (prevVolDiff !== null && Math.abs(prevVolDiff) > 0) {
@@ -694,6 +684,8 @@ export async function mount(container) {
         crossover, trend, alert, confidence,
       });
       prevVolDiff = volDiff;
+      prevCeCum = ceCum;
+      prevPeCum = peCum;
     }
     return out;
   }
@@ -1854,10 +1846,7 @@ export async function mount(container) {
   // ── Initial load ──
   switchTab(activeTab);
   pollTimer = setInterval(() => {
-    if (activeTab === 'all-logs') runQuery(true);
-    else if (activeTab === 'oi-analytics') renderOiAnalytics(true);
-    else if (activeTab === 'oi-logs') renderOiLogs(true);
-    else if (activeTab === 'volume-logs') renderVolumeLogs(true);
+    if (activeTab === 'volume-logs') renderVolumeLogs(true);
     else if (activeTab === 'sr') renderSR(true);
     else if (activeTab === 'oi-change-logs') renderOiChangeLogs(true);
     else if (activeTab === 'entry-signals') renderEntrySignals(true);

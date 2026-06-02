@@ -81,40 +81,55 @@ function buildInstrumentCards(page, data) {
     const spotSub = el('div', { style: { fontSize: '11px', color: 'var(--text-muted)' } }, `${fmtSigned(it.change_abs, 2)} since prev close`);
     card.appendChild(el('div', {}, spotVal, spotSub));
 
+    // ── PCR section: OI PCR (with bar) + Cumulative PCR ──
+    // OI PCR  = total PE OI / total CE OI (standard, on cumulative/total OI)
+    // Cumm PCR = PE cumulative OI change / CE cumulative OI change
     const pcrPct = Math.min(100, Math.max(0, ((it.pcr ?? 1) / 2) * 100));
     const pcrLabel = el('span', { class: `mono ${pcrTone}`, style: { fontWeight: 600 } }, fmtNum(it.pcr, 3));
     const pcrBar = el('div', { style: { height: '100%', width: pcrPct + '%', background: pcrTone === 'bull' ? 'var(--bull)' : 'var(--bear)', borderRadius: '999px' } });
+    const cummPcr = it.cumm_pcr ?? null;
+    const cummPcrLabel = el('span', { class: `mono ${cummPcr != null ? (cummPcr >= 1 ? 'bull' : 'bear') : 'dim'}`, style: { fontWeight: 600 } }, cummPcr != null ? fmtNum(cummPcr, 3) : '—');
     card.appendChild(el('div', {},
       el('div', { style: { display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: 'var(--text-muted)', marginBottom: '4px' } },
-        el('span', {}, 'PCR'), pcrLabel
+        el('span', {}, 'PCR (OI)'), pcrLabel
       ),
-      el('div', { style: { height: '4px', background: 'var(--surface-3)', borderRadius: '999px', overflow: 'hidden' } }, pcrBar)
+      el('div', { style: { height: '4px', background: 'var(--surface-3)', borderRadius: '999px', overflow: 'hidden' } }, pcrBar),
+      el('div', { style: { display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: 'var(--text-muted)', marginTop: '6px' } },
+        el('span', {}, 'Cumulative PCR'), cummPcrLabel
+      )
     ));
 
-    const ceOi = el('div', { class: 'mono', style: { fontSize: '13px', fontWeight: 500 } }, fmtCompact(it.total_ce_oi));
-    const ceChange = el('div', { class: 'mono', style: { fontSize: '10px' } }, '—');
-    const peOi = el('div', { class: 'mono', style: { fontSize: '13px', fontWeight: 500 } }, fmtCompact(it.total_pe_oi));
-    const peChange = el('div', { class: 'mono', style: { fontSize: '10px' } }, '—');
-
-    card.appendChild(el('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' } },
-      el('div', {}, el('div', { style: { fontSize: '10px', color: 'var(--text-muted)' } }, 'Call OI'), ceOi, ceChange),
-      el('div', {}, el('div', { style: { fontSize: '10px', color: 'var(--text-muted)' } }, 'Put OI'), peOi, peChange)
-    ));
-
-    // ΔPCR = ΔPE_OI / ΔCE_OI (ratio of OI changes from prev close baseline)
-    const deltaPcr = it.delta_pcr ?? null;
-    const deltaPcrTone = deltaPcr != null ? (deltaPcr >= 0 ? 'bull' : 'bear') : '';
-    const deltaPcrVal = el('div', { class: `mono ${deltaPcrTone}`, style: { fontSize: '15px', fontWeight: 600 } }, deltaPcr != null ? fmtNum(deltaPcr, 3) : '—');
-    card.appendChild(el('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: '10px', borderTop: '1px solid var(--border)' } },
-      el('span', { style: { fontSize: '10px', color: 'var(--text-muted)', fontWeight: 500 } }, 'ΔPCR (OI Change)'),
-      deltaPcrVal
+    // ── Call OI / Put OI: Current / Latest Δ / Cumulative Δ (labelled) ──
+    const mkSide = () => ({
+      cur: el('span', { class: 'mono', style: { fontSize: '12px', fontWeight: 600 } }, '—'),
+      latest: el('span', { class: 'mono', style: { fontSize: '11px' } }, '—'),
+      cumm: el('span', { class: 'mono', style: { fontSize: '11px' } }, '—'),
+    });
+    const ce = mkSide();
+    const pe = mkSide();
+    const statLine = (label, valEl, top) => el('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', fontSize: '10px', marginTop: top ? '3px' : '0' } },
+      el('span', { style: { color: 'var(--text-muted)' } }, label), valEl);
+    const sideBlock = (title, s) => el('div', {},
+      el('div', { style: { fontSize: '10px', color: 'var(--text-muted)', fontWeight: 600, marginBottom: '5px', textTransform: 'uppercase', letterSpacing: '0.4px' } }, title),
+      statLine('Current OI', s.cur, false),
+      statLine('Latest Δ', s.latest, true),
+      statLine('Cumm Δ', s.cumm, true),
+    );
+    card.appendChild(el('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px', paddingTop: '10px', borderTop: '1px solid var(--border)' } },
+      sideBlock('Call OI (CE)', ce),
+      sideBlock('Put OI (PE)', pe)
     ));
 
     const spark = el('div', { style: { height: '50px', marginTop: '4px', marginInline: '-4px' } });
     card.appendChild(spark);
     instGrid.appendChild(card);
 
-    _instCardEls[it.instrument] = { card, pill, spotVal, spotSub, pcrLabel, pcrBar, ceOi, ceChange, peOi, peChange, deltaPcrVal, spark };
+    _instCardEls[it.instrument] = {
+      card, pill, spotVal, spotSub, pcrLabel, pcrBar, cummPcrLabel,
+      ceCur: ce.cur, ceLatest: ce.latest, ceCumm: ce.cumm,
+      peCur: pe.cur, peLatest: pe.latest, peCumm: pe.cumm,
+      spark,
+    };
   });
 }
 
@@ -261,22 +276,31 @@ function updateInstrumentCards(data) {
     const pcrPct = Math.min(100, Math.max(0, ((it.pcr ?? 1) / 2) * 100));
     refs.pcrLabel.className = `mono ${pcrTone}`; refs.pcrLabel.textContent = fmtNum(it.pcr, 3);
     refs.pcrBar.style.width = pcrPct + '%'; refs.pcrBar.style.background = pcrTone === 'bull' ? 'var(--bull)' : 'var(--bear)';
-    refs.ceOi.textContent = fmtCompact(it.total_ce_oi);
-    refs.peOi.textContent = fmtCompact(it.total_pe_oi);
-    // Latest tick-to-tick OI change (populated by fetchLatestOiChanges)
-    const latest = _latestOiChange[it.instrument];
-    if (latest) {
-      refs.ceChange.className = `mono ${latest.ce >= 0 ? 'bull' : 'bear'}`;
-      refs.ceChange.textContent = (latest.ce >= 0 ? '+' : '') + fmtCompact(latest.ce);
-      refs.peChange.className = `mono ${latest.pe >= 0 ? 'bull' : 'bear'}`;
-      refs.peChange.textContent = (latest.pe >= 0 ? '+' : '') + fmtCompact(latest.pe);
-    }
+    // Cumulative PCR (PE cumm OI change / CE cumm OI change), from backend
+    const cummPcr = it.cumm_pcr ?? null;
+    refs.cummPcrLabel.className = `mono ${cummPcr != null ? (cummPcr >= 1 ? 'bull' : 'bear') : 'dim'}`;
+    refs.cummPcrLabel.textContent = cummPcr != null ? fmtNum(cummPcr, 3) : '—';
 
-    // ΔPCR = ratio of the latest tick-to-tick OI changes (ΔPE / ΔCE)
-    const pcrChange = latest?.delta_pcr ?? null;
-    const pcrChangeTone = pcrChange != null ? (pcrChange >= 0 ? 'bull' : 'bear') : '';
-    refs.deltaPcrVal.className = `mono ${pcrChangeTone}`;
-    refs.deltaPcrVal.textContent = pcrChange != null ? fmtNum(pcrChange, 3) : '—';
+    // Current OI
+    refs.ceCur.textContent = fmtCompact(it.total_ce_oi);
+    refs.peCur.textContent = fmtCompact(it.total_pe_oi);
+
+    // Latest per-tick OI change — prefer the backend computed_tick value;
+    // fall back to the frontend-computed pair (has a pre-market fallback).
+    const fb = _latestOiChange[it.instrument];
+    const ceLatest = it.ce_oi_latest_change ?? fb?.ce ?? null;
+    const peLatest = it.pe_oi_latest_change ?? fb?.pe ?? null;
+    const setDelta = (elm, v) => {
+      if (v == null) { elm.className = 'mono dim'; elm.textContent = '—'; return; }
+      elm.className = `mono ${v >= 0 ? 'bull' : 'bear'}`;
+      elm.textContent = (v >= 0 ? '+' : '') + fmtCompact(v);
+    };
+    setDelta(refs.ceLatest, ceLatest);
+    setDelta(refs.peLatest, peLatest);
+
+    // Cumulative OI change (from market baseline), from backend computed_tick
+    setDelta(refs.ceCumm, it.ce_oi_cumm_change ?? null);
+    setDelta(refs.peCumm, it.pe_oi_cumm_change ?? null);
 
     // Sparkline — update data only, never dispose/recreate
     const pts = (it.spark?.spot || [])
