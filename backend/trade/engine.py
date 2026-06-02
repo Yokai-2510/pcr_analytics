@@ -185,23 +185,22 @@ def _volume_signal(
 ) -> dict[str, Any] | None:
     """Latest volume crossover — matches the Volume Logs tab exactly.
 
-    Replicates the tab's math precisely: walk the per-fetch total CE/PE
-    volume series (data_processor.get_total_volume_series — one row per
-    15s fetch), keep a running cumulative of each, and watch the sign of
-    (PE_cum - CE_cum):
-        flip to >= 0  ->  'PE Cross Up'  -> bullish -> BUY (enter CE)
-        flip to <= 0  ->  'CE Cross Up'  -> bearish -> SELL (enter PE)
-    Returns the latest such flip (optionally restricted to after after_iso).
-    Using the same data + math as the tab guarantees display == trades.
+    get_total_volume_series returns the cross-strike day-cumulative CE/PE
+    volume at each 15s fetch (total_ce_volume = CEcum(t), monotonic). The
+    crossover is the sign flip of the single cumulative difference:
+        vol_diff(t) = PEcum(t) - CEcum(t)
+        flip to >= 0  ->  PE volume overtakes CE  -> bullish -> BUY (enter CE)
+        flip to <= 0  ->  CE volume overtakes PE  -> bearish -> SELL (enter PE)
+    This is sampling-independent (same at 15s or 1min) and identical to the
+    Volume Logs "Vol Diff (PE-CE)" crossover column. Returns the latest flip
+    (optionally restricted to after after_iso).
     """
     series = data_processor.get_total_volume_series(instrument, date)
-    ce_cum = 0.0
-    pe_cum = 0.0
     prev_diff: float | None = None
     last_flip: dict[str, Any] | None = None
     for row in series:
-        ce_cum += utils.safe_float(row.get("total_ce_volume"), 0.0) or 0.0
-        pe_cum += utils.safe_float(row.get("total_pe_volume"), 0.0) or 0.0
+        ce_cum = utils.safe_float(row.get("total_ce_volume"), 0.0) or 0.0
+        pe_cum = utils.safe_float(row.get("total_pe_volume"), 0.0) or 0.0
         vol_diff = pe_cum - ce_cum
         if prev_diff is not None:
             if prev_diff < 0 <= vol_diff:

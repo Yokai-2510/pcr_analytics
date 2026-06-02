@@ -348,6 +348,21 @@ def _aggregate_latest_for(instrument: str, date: str) -> dict[str, Any] | None:
                 "pe_oi": brow["pe_oi"] if brow else None,
             }
 
+        # Latest computed tick — the canonical per-minute OI metrics shared
+        # with OI Change Logs / Entry Signals / the trade engine. Sourcing the
+        # cumulative change + cumulative PCR here keeps the dashboard cards
+        # consistent with everything else (single source of truth).
+        ctick = conn.execute(
+            """
+            SELECT ce_oi_change, pe_oi_change,
+                   ce_oi_cumm_change, pe_oi_cumm_change, oi_difference
+            FROM computed_ticks
+            WHERE instrument = ? AND substr(timestamp, 1, 10) = ?
+            ORDER BY timestamp DESC LIMIT 1
+            """,
+            (instrument, date),
+        ).fetchone()
+
     open_spot = first and first["spot"]
     spot = agg and agg["spot"]
     change_abs = (spot - open_spot) if spot is not None and open_spot is not None else None
@@ -381,6 +396,11 @@ def _aggregate_latest_for(instrument: str, date: str) -> dict[str, Any] | None:
     if ce_change is not None and ce_change > 0 and pe_change is not None:
         delta_pcr = pe_change / ce_change
 
+    # Cumulative OI change + cumulative PCR from the latest computed tick.
+    ce_cumm = ctick["ce_oi_cumm_change"] if ctick else None
+    pe_cumm = ctick["pe_oi_cumm_change"] if ctick else None
+    cumm_pcr = (pe_cumm / ce_cumm) if (ce_cumm not in (None, 0) and pe_cumm is not None) else None
+
     return {
         "timestamp": ts,
         "spot": spot,
@@ -390,6 +410,12 @@ def _aggregate_latest_for(instrument: str, date: str) -> dict[str, Any] | None:
         "atm_strike": agg["atm_strike"],
         "pcr": agg["pcr"],
         "delta_pcr": delta_pcr,
+        # Per-minute OI changes from the canonical computed_ticks layer
+        "ce_oi_latest_change": ctick["ce_oi_change"] if ctick else None,
+        "pe_oi_latest_change": ctick["pe_oi_change"] if ctick else None,
+        "ce_oi_cumm_change": ce_cumm,
+        "pe_oi_cumm_change": pe_cumm,
+        "cumm_pcr": cumm_pcr,
         "total_ce_oi": agg["total_ce_oi"],
         "total_pe_oi": agg["total_pe_oi"],
         "total_ce_volume": agg["total_ce_volume"],
