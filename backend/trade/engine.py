@@ -111,14 +111,15 @@ def _evaluate_one_exit(
     # closes PE (because we entered PE on a SELL crossover). Pass 2 (entries)
     # will then re-open on the new side in the same tick.
     #
-    # The signal source must match the one that opened the position — using
-    # the same signal_mode keeps entries and exits coherent (a volume_only
-    # position exits on a volume counter-crossover, not an OI one).
+    # Counter-crossover closes the leg. Each position exits on a crossover of
+    # its OWN source — an OI position flips on an OI counter-crossover, a
+    # volume position on a volume counter-crossover. Pass 2 then re-opens that
+    # source's new leg in the same tick.
     if config.get("exit_on_counter_crossover", True):
         counter = "SELL" if side == "CE" else "BUY"
-        signal_mode = str(config.get("signal_mode") or "oi_only")
-        latest = _mode_signal(
-            instrument, today, signal_mode, after_iso=position["entry_time"],
+        source = position.get("source") or "oi"
+        latest = _source_signal(
+            source, instrument, today, after_iso=position["entry_time"],
         )
         if latest and latest.get("signal") == counter:
             _close(position, "exit_crossover", ltp, b)
@@ -220,38 +221,6 @@ def _volume_signal(
     last_flip.setdefault("ce_oi_cumm_change", None)
     last_flip.setdefault("pe_oi_cumm_change", None)
     return last_flip
-
-
-def _mode_signal(
-    instrument: str,
-    date: str,
-    signal_mode: str,
-    after_iso: str | None = None,
-) -> dict[str, Any] | None:
-    """The effective signal for the configured signal_mode. Used by BOTH
-    entries (after_iso=None) and exits (after_iso=entry_time) so the two
-    are always coherent.
-
-      oi_only     -> latest OI crossover
-      volume_only -> latest volume crossover
-      combined    -> both must agree on direction; fires on the later of the
-                     two timestamps, carrying OI context fields
-    """
-    if signal_mode == "volume_only":
-        return _volume_signal(instrument, date, after_iso)
-    if signal_mode == "combined":
-        oi_sig = _oi_signal(instrument, date, after_iso)
-        vol_sig = _volume_signal(instrument, date, after_iso)
-        if not oi_sig or not vol_sig:
-            return None
-        if oi_sig.get("signal") != vol_sig.get("signal"):
-            return None
-        out = dict(oi_sig)  # carry OI ctx (oi_difference, pcr, cumm changes)
-        if str(vol_sig["timestamp"]) > str(oi_sig["timestamp"]):
-            out["timestamp"] = vol_sig["timestamp"]
-        return out
-    # default: oi_only
-    return _oi_signal(instrument, date, after_iso)
 
 
 def _maybe_ratchet_tsl(
@@ -370,6 +339,26 @@ def _evaluate_entries(
             )
 
 
+def _active_sources(signal_mode: str) -> list[str]:
+    """Which strategies are active for the configured mode.
+        oi_only     -> ['oi']
+        volume_only -> ['volume']
+        both        -> ['oi', 'volume']  (run independently, in parallel)
+    'combined' is treated as a legacy alias for 'both'."""
+    if signal_mode == "volume_only":
+        return ["volume"]
+    if signal_mode in ("both", "combined"):
+        return ["oi", "volume"]
+    return ["oi"]
+
+
+def _source_signal(source: str, instrument: str, date: str, after_iso: str | None = None):
+    """Latest crossover for a single source ('oi' or 'volume')."""
+    if source == "volume":
+        return _volume_signal(instrument, date, after_iso)
+    return _oi_signal(instrument, date, after_iso)
+
+
 def _evaluate_one_entry(
     instrument: str,
     config: dict[str, Any],
@@ -377,25 +366,36 @@ def _evaluate_one_entry(
     now: datetime,
     b: broker_mod.Broker,
 ) -> None:
-    # Gate: don't pyramid — one open position per instrument
-    if persistence.has_open_for_instrument(instrument):
+    # In 'both' mode the OI and volume strategies are evaluated independently,
+    # so one instrument can carry an OI position AND a volume position at once.
+    signal_mode = str(config.get("signal_mode") or "oi_only")
+    for source in _active_sources(signal_mode):
+        _evaluate_one_entry_source(instrument, source, config, today, now, b)
+
+
+def _evaluate_one_entry_source(
+    instrument: str,
+    source: str,
+    config: dict[str, Any],
+    today: str,
+    now: datetime,
+    b: broker_mod.Broker,
+) -> None:
+    # Gate: one open position per (instrument, source) — no pyramiding within
+    # a source, but OI and volume each get their own independent leg.
+    if persistence.has_open_for_instrument_source(instrument, source):
         return  # silent; we'd flood the audit log otherwise
 
-    # Gate: cooldown
+    # Gate: cooldown (per instrument+source)
     cooldown_min = int(config.get("cooldown_minutes") or 0)
     if cooldown_min > 0:
-        last_ts = persistence.last_entry_time_for_instrument(instrument, today)
+        last_ts = persistence.last_entry_time_for_instrument_source(instrument, source, today)
         if last_ts and _iso_seconds_ago(last_ts, now) < cooldown_min * 60:
             return  # silent
 
-    # Pull the latest actionable signal for the configured signal_mode.
-    # _mode_signal is the single source of truth shared with the exit path:
-    #   oi_only     — OI cumulative diff sign-flip (existing strategy)
-    #   volume_only — volume cumulative diff sign-flip (matches Volume Logs)
-    #   combined    — BOTH must agree on direction (higher confidence filter)
-    # Direction -> leg is fixed: BUY -> CE, SELL -> PE.
-    signal_mode = str(config.get("signal_mode") or "oi_only")
-    signal = _mode_signal(instrument, today, signal_mode)
+    # Latest crossover for THIS source. Direction -> leg is fixed:
+    # BUY -> CE, SELL -> PE.
+    signal = _source_signal(source, instrument, today)
 
     if not signal:
         return  # no fresh signal — silent
@@ -405,8 +405,8 @@ def _evaluate_one_entry(
     if stale_s > 90:
         return  # silent — would log every tick otherwise
 
-    # Don't re-enter on a signal we've already acted on
-    if _entry_already_exists(instrument, signal["timestamp"]):
+    # Don't re-enter on a signal we've already acted on (per source)
+    if _entry_already_exists(instrument, source, signal["timestamp"]):
         return  # silent
 
     side = _decide_side(signal.get("signal"))
@@ -488,6 +488,7 @@ def _evaluate_one_entry(
             signal_timestamp=signal["timestamp"],
             placed_at=utils.iso_now(),
             error=None,
+            source=source,
         ),
         position_fields=dict(
             instrument=instrument,
@@ -504,6 +505,7 @@ def _evaluate_one_entry(
             target_price=target_price,
             mode=b.mode,
             signal_timestamp=signal["timestamp"],
+            source=source,
             ctx_oi_difference=utils.safe_float(signal.get("oi_difference")),
             ctx_pcr=utils.safe_float(signal.get("pcr")),
             ctx_ce_cumm=utils.safe_float(signal.get("ce_oi_cumm_change")),
@@ -520,7 +522,7 @@ def _evaluate_one_entry(
     persistence.audit(
         "entry_placed", instrument=instrument,
         client_order_ref=result.client_order_ref,
-        message=f"side={side} strike={leg['strike']} price={fill_price} qty={qty}",
+        message=f"source={source} side={side} strike={leg['strike']} price={fill_price} qty={qty}",
     )
 
 
@@ -540,17 +542,18 @@ def _decide_side(signal: str | None) -> str | None:
     return None
 
 
-def _entry_already_exists(instrument: str, signal_timestamp: str) -> bool:
+def _entry_already_exists(instrument: str, source: str, signal_timestamp: str) -> bool:
     with closing(data_processor.connect()) as conn:
         row = conn.execute(
             """
             SELECT 1 FROM orders
             WHERE instrument = ?
+              AND source = ?
               AND signal_timestamp = ?
               AND intent = 'entry'
             LIMIT 1
             """,
-            (instrument, signal_timestamp),
+            (instrument, source, signal_timestamp),
         ).fetchone()
     return row is not None
 

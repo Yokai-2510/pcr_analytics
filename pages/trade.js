@@ -197,12 +197,13 @@ function renderEntrySection(cfg) {
 
   const signalModeSel = Select({
     options: [
-      { value: 'oi_only',     label: 'OI only — cumulative OI diff crossover' },
-      { value: 'volume_only', label: 'Volume only — cumulative volume diff crossover' },
-      { value: 'combined',    label: 'Combined — both OI + Volume must agree' },
+      { value: 'oi_only',     label: 'OI only — OI crossovers' },
+      { value: 'volume_only', label: 'Volume only — volume crossovers' },
+      { value: 'both',        label: 'Both — OI & Volume independently (2 legs/instrument)' },
     ],
-    value: cfg.signal_mode || 'oi_only',
-    width: '320px',
+    // Legacy 'combined' configs now mean 'both' (independent).
+    value: (cfg.signal_mode === 'combined' ? 'both' : (cfg.signal_mode || 'oi_only')),
+    width: '340px',
     onChange: (v) => { cfg.signal_mode = v; },
   });
 
@@ -244,7 +245,7 @@ function renderEntrySection(cfg) {
     FormField({
       label: 'Entry signal source',
       input: signalModeSel.el,
-      hint: 'OI only: proven strategy. Volume only: institutional participation crossover. Combined: both must agree — fewer trades, higher confidence.',
+      hint: 'OI only: trade OI crossovers. Volume only: trade volume crossovers. Both: run OI and Volume independently — an instrument can hold an OI leg and a volume leg at the same time, each closing/reopening on its own crossover.',
     }),
     FormField({
       label: 'Entry direction (auto)',
@@ -602,7 +603,7 @@ function openRow(p) {
   const pnl = p.unrealized_pnl;
   return el('tr', { class: 'data-row' },
     cell(fmtTime(p.entry_time)),
-    cell(p.instrument),
+    cell(`${p.instrument} · ${(p.source || 'oi') === 'volume' ? 'VOL' : 'OI'}`),
     cell(p.strike),
     cell(p.option_type, p.option_type === 'CE' ? 'bull' : 'bear'),
     cell(p.qty),
@@ -632,7 +633,7 @@ function closedRow(p) {
   return el('tr', { class: 'data-row' },
     cell(fmtTime(p.entry_time)),
     cell(fmtTime(p.exit_time)),
-    cell(p.instrument),
+    cell(`${p.instrument} · ${(p.source || 'oi') === 'volume' ? 'VOL' : 'OI'}`),
     cell(p.strike),
     cell(p.option_type, p.option_type === 'CE' ? 'bull' : 'bear'),
     cell(p.qty),

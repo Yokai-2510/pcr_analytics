@@ -57,7 +57,8 @@ _SCHEMA = [
         signal_timestamp TEXT,
         placed_at TEXT NOT NULL,
         error TEXT,
-        UNIQUE(instrument, signal_timestamp, intent)
+        source TEXT NOT NULL DEFAULT 'oi',
+        UNIQUE(instrument, source, signal_timestamp, intent)
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_orders_placed_at ON orders(placed_at)",
@@ -90,7 +91,8 @@ _SCHEMA = [
         ctx_ce_cumm REAL,
         ctx_pe_cumm REAL,
         ctx_margin REAL,
-        manual_exit_requested INTEGER NOT NULL DEFAULT 0
+        manual_exit_requested INTEGER NOT NULL DEFAULT 0,
+        source TEXT NOT NULL DEFAULT 'oi'
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status, instrument)",
@@ -120,11 +122,51 @@ _SCHEMA = [
 
 
 def init_schema(conn: sqlite3.Connection) -> None:
-    """Create trade tables if they don't exist. Idempotent."""
+    """Create trade tables if they don't exist, then migrate. Idempotent."""
     for stmt in _SCHEMA:
         conn.execute(stmt)
+    _migrate_source_columns(conn)
     conn.commit()
     logger.info("trade.persistence: schema initialised")
+
+
+def _migrate_source_columns(conn: sqlite3.Connection) -> None:
+    """Add the `source` tag ('oi'|'volume') to positions/orders on pre-existing
+    DBs and rebuild the orders UNIQUE to be source-aware, so OI and volume
+    strategies can each hold their own position per instrument. Idempotent."""
+    # PRAGMA table_info columns: (cid, name, type, notnull, dflt_value, pk);
+    # index by position so this works regardless of the connection row_factory.
+    pcols = {r[1] for r in conn.execute("PRAGMA table_info(positions)").fetchall()}
+    if "source" not in pcols:
+        conn.execute("ALTER TABLE positions ADD COLUMN source TEXT NOT NULL DEFAULT 'oi'")
+
+    ocols = {r[1] for r in conn.execute("PRAGMA table_info(orders)").fetchall()}
+    if "source" not in ocols:
+        # orders carries an inline UNIQUE(instrument, signal_timestamp, intent)
+        # that must become source-aware — SQLite needs a table rebuild for that.
+        conn.execute("ALTER TABLE orders RENAME TO _orders_old")
+        for stmt in _SCHEMA:
+            if "CREATE TABLE IF NOT EXISTS orders" in stmt:
+                conn.execute(stmt)
+                break
+        conn.execute(
+            """
+            INSERT INTO orders (
+                id, client_order_ref, broker_order_id, instrument, instrument_token,
+                strike, option_type, transaction_type, qty, lots, price, status,
+                intent, parent_position_id, mode, signal_timestamp, placed_at, error, source
+            )
+            SELECT
+                id, client_order_ref, broker_order_id, instrument, instrument_token,
+                strike, option_type, transaction_type, qty, lots, price, status,
+                intent, parent_position_id, mode, signal_timestamp, placed_at, error, 'oi'
+            FROM _orders_old
+            """
+        )
+        conn.execute("DROP TABLE _orders_old")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_orders_placed_at ON orders(placed_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_orders_intent ON orders(intent)")
+        logger.info("trade.persistence: migrated orders to source-aware UNIQUE")
 
 
 # ── Config ─────────────────────────────────────────────────────────────
@@ -133,7 +175,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
 DEFAULT_CONFIG: dict[str, Any] = {
     "mode": "paper",
     "auto_execute": False,
-    "signal_mode": "oi_only",   # "oi_only" | "volume_only" | "combined"
+    "signal_mode": "oi_only",   # "oi_only" | "volume_only" | "both" (independent)
     "cooldown_minutes": 0,
     "instruments": ["nifty"],
     "strike_mode": "atm",
@@ -204,9 +246,9 @@ def insert_order(conn: sqlite3.Connection, fields: dict[str, Any]) -> int:
         "instrument", "instrument_token", "strike", "option_type",
         "transaction_type", "qty", "lots", "price",
         "status", "intent", "parent_position_id", "mode",
-        "signal_timestamp", "placed_at", "error",
+        "signal_timestamp", "placed_at", "error", "source",
     ]
-    values = tuple(fields.get(c) for c in columns)
+    values = tuple(fields.get(c, "oi" if c == "source" else None) for c in columns)
     placeholders = ", ".join("?" for _ in columns)
     col_sql = ", ".join(columns)
     cur = conn.execute(
@@ -262,10 +304,10 @@ def insert_position(conn: sqlite3.Connection, fields: dict[str, Any]) -> int:
         "instrument", "instrument_token", "strike", "option_type",
         "qty", "lots", "entry_order_id", "entry_price", "entry_time",
         "status", "high_watermark", "sl_price", "target_price",
-        "mode", "signal_timestamp",
+        "mode", "signal_timestamp", "source",
         "ctx_oi_difference", "ctx_pcr", "ctx_ce_cumm", "ctx_pe_cumm", "ctx_margin",
     ]
-    values = tuple(fields.get(c) for c in columns)
+    values = tuple(fields.get(c, "oi" if c == "source" else None) for c in columns)
     placeholders = ", ".join("?" for _ in columns)
     col_sql = ", ".join(columns)
     cur = conn.execute(
@@ -294,6 +336,34 @@ def has_open_for_instrument(instrument: str) -> bool:
             (instrument,),
         ).fetchone()
     return row is not None
+
+
+def has_open_for_instrument_source(instrument: str, source: str) -> bool:
+    """True if there's an open position for (instrument, source). The OI and
+    volume strategies each hold at most one leg per instrument, independently."""
+    with closing(data_processor.connect()) as conn:
+        row = conn.execute(
+            """
+            SELECT 1 FROM positions
+            WHERE instrument = ? AND source = ? AND status IN ('open', 'exiting')
+            LIMIT 1
+            """,
+            (instrument, source),
+        ).fetchone()
+    return row is not None
+
+
+def last_entry_time_for_instrument_source(instrument: str, source: str, date: str) -> str | None:
+    with closing(data_processor.connect()) as conn:
+        row = conn.execute(
+            """
+            SELECT MAX(placed_at) AS ts FROM orders
+            WHERE instrument = ? AND source = ? AND intent = 'entry'
+              AND substr(placed_at, 1, 10) = ?
+            """,
+            (instrument, source, date),
+        ).fetchone()
+    return row["ts"] if row and row["ts"] else None
 
 
 def positions_for_date(date: str, status: str | None = None) -> list[dict[str, Any]]:
