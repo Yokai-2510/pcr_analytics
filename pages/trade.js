@@ -195,17 +195,34 @@ function renderEntrySection(cfg) {
     onChange: (on) => { cfg.auto_execute = on; },
   });
 
-  const signalModeSel = Select({
-    options: [
-      { value: 'oi_only',     label: 'OI only — OI crossovers' },
-      { value: 'volume_only', label: 'Volume only — volume crossovers' },
-      { value: 'both',        label: 'Both — OI & Volume independently (2 legs/instrument)' },
-    ],
-    // Legacy 'combined' configs now mean 'both' (independent).
-    value: (cfg.signal_mode === 'combined' ? 'both' : (cfg.signal_mode || 'oi_only')),
-    width: '340px',
-    onChange: (v) => { cfg.signal_mode = v; },
+  // signal_mode is stored as a comma-joined list of active sources.
+  // Legacy single-word values are mapped: 'both'/'combined' -> ['oi','volume'],
+  // 'oi_only'->'oi', 'volume_only'->'volume', 'vwap_only'->'vwap'.
+  function _parseSources(mode) {
+    const aliases = { oi_only:'oi', volume_only:'volume', vwap_only:'vwap', both:'oi,volume', combined:'oi,volume' };
+    const resolved = aliases[mode] || mode || 'oi';
+    return resolved.split(',').map(s => s.trim()).filter(s => s);
+  }
+  function _sourcesToMode(arr) { return arr.length ? arr.join(',') : 'oi'; }
+
+  const activeSources = _parseSources(cfg.signal_mode || 'oi_only');
+  const sigChecks = {};
+  ['oi', 'volume', 'vwap'].forEach(src => {
+    const cb = el('input', { type: 'checkbox', id: `sig_${src}` });
+    cb.checked = activeSources.includes(src);
+    cb.onchange = () => {
+      const active = ['oi','volume','vwap'].filter(s => sigChecks[s].checked);
+      cfg.signal_mode = _sourcesToMode(active.length ? active : ['oi']); // at least one
+      if (!active.length) sigChecks['oi'].checked = true;
+    };
+    sigChecks[src] = cb;
   });
+  const signalModeEl = el('div', { style: { display: 'flex', gap: '18px', alignItems: 'center', flexWrap: 'wrap' } },
+    ...['oi', 'volume', 'vwap'].map(src => el('label', { style: { display: 'flex', gap: '6px', alignItems: 'center', fontSize: '13px', cursor: 'pointer', fontWeight: 500 } },
+      sigChecks[src],
+      el('span', {}, src === 'oi' ? 'OI' : src === 'volume' ? 'Volume' : 'VWAP')
+    ))
+  );
 
   const directionRules = el('div', {
     style: {
@@ -244,8 +261,8 @@ function renderEntrySection(cfg) {
     }),
     FormField({
       label: 'Entry signal source',
-      input: signalModeSel.el,
-      hint: 'OI only: trade OI crossovers. Volume only: trade volume crossovers. Both: run OI and Volume independently — an instrument can hold an OI leg and a volume leg at the same time, each closing/reopening on its own crossover.',
+      input: signalModeEl,
+      hint: 'Each checked source runs independently — one position per source per instrument. OI: cumulative OI diff crossover. Volume: cumulative volume diff crossover. VWAP: spot vs session VWAP (post 09:20 warm-up, 0.05% band).',
     }),
     FormField({
       label: 'Entry direction (auto)',

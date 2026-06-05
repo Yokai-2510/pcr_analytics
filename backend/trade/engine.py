@@ -223,6 +223,102 @@ def _volume_signal(
     return last_flip
 
 
+def _vwap_signal(
+    instrument: str,
+    date: str,
+    after_iso: str | None = None,
+) -> dict[str, Any] | None:
+    """Latest VWAP-based directional signal for (instrument, date).
+
+    VWAP is session-anchored at 09:15 IST and resets daily. We use the
+    total-volume series (get_total_volume_series) which already holds per-tick
+    CE+PE cumulative volumes and the underlying spot price at each fetch:
+        TP(t) = underlying_spot_price(t)          (H=L=C=spot at tick level)
+        Vol(t) = ΔCE_vol(t) + ΔPE_vol(t)        (per-tick incremental volume)
+        VWAP(t) = Σ TP(i)·Vol(i) / Σ Vol(i)      (session cumulative)
+
+    Signal (only after 09:20 warm-up period):
+        spot > VWAP + 0.05%  →  BUY   (enter CE)
+        spot < VWAP − 0.05%  →  SELL  (enter PE)
+        else                 →  NEUTRAL (no signal)
+
+    Returns the most recent BUY or SELL state (not a flip — the current
+    directional position), optionally restricted to signals after after_iso.
+    This mirrors how the trade engine reads OI: "what is the current signal
+    direction?" rather than "when did it last flip?".
+    """
+    WARMUP_END = "09:20"   # HH:MM — no signals before this
+    BAND_PCT   = 0.0005    # 0.05% band around VWAP
+
+    series = data_processor.get_total_volume_series(instrument, date)
+    if not series:
+        return None
+
+    cum_pv = 0.0
+    cum_vol = 0.0
+    prev_ce_cum: float | None = None
+    prev_pe_cum: float | None = None
+    last_signal: dict[str, Any] | None = None
+
+    for row in series:
+        ts = row.get("timestamp") or ""
+        hhmm = ts[11:16] if len(ts) >= 16 else ""
+        if hhmm < "09:15":
+            continue
+
+        spot = utils.safe_float(row.get("underlying_spot_price"), 0.0) or 0.0
+        ce_cum_raw = utils.safe_float(row.get("total_ce_volume"), 0.0) or 0.0
+        pe_cum_raw = utils.safe_float(row.get("total_pe_volume"), 0.0) or 0.0
+
+        # Per-tick incremental volume (series returns day-cumulative per row)
+        ce_delta = max(0.0, ce_cum_raw - prev_ce_cum) if prev_ce_cum is not None else ce_cum_raw
+        pe_delta = max(0.0, pe_cum_raw - prev_pe_cum) if prev_pe_cum is not None else pe_cum_raw
+        prev_ce_cum = ce_cum_raw
+        prev_pe_cum = pe_cum_raw
+
+        tick_vol = ce_delta + pe_delta
+        if spot > 0 and tick_vol > 0:
+            cum_pv += spot * tick_vol
+            cum_vol += tick_vol
+
+        if cum_vol <= 0 or spot <= 0:
+            continue
+
+        vwap = cum_pv / cum_vol
+
+        # Warm-up: accumulate VWAP but emit no signal before 09:20
+        if hhmm < WARMUP_END:
+            continue
+
+        band = vwap * BAND_PCT
+        if spot > vwap + band:
+            sig = "BUY"
+        elif spot < vwap - band:
+            sig = "SELL"
+        else:
+            continue  # NEUTRAL — no active directional position
+
+        candidate = {
+            "timestamp": ts,
+            "signal": sig,
+            "vwap": vwap,
+            "spot": spot,
+            "band": band,
+            "oi_difference": None,
+            "pcr": None,
+            "ce_oi_cumm_change": None,
+            "pe_oi_cumm_change": None,
+        }
+        # Keep updating: we want the MOST RECENT directional state
+        last_signal = candidate
+
+    if last_signal is None:
+        return None
+    if after_iso and str(last_signal["timestamp"]) <= str(after_iso):
+        return None
+    return last_signal
+
+
 def _maybe_ratchet_tsl(
     position: dict[str, Any],
     ltp: float,
@@ -341,21 +437,39 @@ def _evaluate_entries(
 
 def _active_sources(signal_mode: str) -> list[str]:
     """Which strategies are active for the configured mode.
-        oi_only     -> ['oi']
-        volume_only -> ['volume']
-        both        -> ['oi', 'volume']  (run independently, in parallel)
-    'combined' is treated as a legacy alias for 'both'."""
-    if signal_mode == "volume_only":
-        return ["volume"]
-    if signal_mode in ("both", "combined"):
-        return ["oi", "volume"]
-    return ["oi"]
+
+    signal_mode is a string OR a comma-joined list of sources:
+        'oi_only'    / 'oi'     -> ['oi']
+        'volume_only'/ 'volume' -> ['volume']
+        'vwap_only'  / 'vwap'   -> ['vwap']
+        'both' / 'combined'     -> ['oi', 'volume']      (legacy)
+        'oi,volume'             -> ['oi', 'volume']
+        'oi,vwap'               -> ['oi', 'vwap']
+        'volume,vwap'           -> ['volume', 'vwap']
+        'oi,volume,vwap'        -> ['oi', 'volume', 'vwap']
+    """
+    mode = str(signal_mode or "oi_only").strip()
+    # Legacy single-word aliases
+    aliases = {
+        "oi_only": ["oi"],
+        "volume_only": ["volume"],
+        "vwap_only": ["vwap"],
+        "both": ["oi", "volume"],
+        "combined": ["oi", "volume"],
+    }
+    if mode in aliases:
+        return aliases[mode]
+    # Comma-separated list of sources e.g. "oi,vwap"
+    parts = [p.strip() for p in mode.split(",") if p.strip() in ("oi", "volume", "vwap")]
+    return parts if parts else ["oi"]
 
 
 def _source_signal(source: str, instrument: str, date: str, after_iso: str | None = None):
-    """Latest crossover for a single source ('oi' or 'volume')."""
+    """Latest crossover/direction signal for a single source ('oi', 'volume', 'vwap')."""
     if source == "volume":
         return _volume_signal(instrument, date, after_iso)
+    if source == "vwap":
+        return _vwap_signal(instrument, date, after_iso)
     return _oi_signal(instrument, date, after_iso)
 
 

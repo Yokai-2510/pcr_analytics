@@ -624,64 +624,100 @@ export async function mount(container) {
     return (trend === 'Strong' || trend === 'Very Strong') ? 'High' : 'Low';
   }
 
+  // ── VWAP helpers (session-anchored, per the spec) ──────────────────────
+  // VWAP(t) = Σ TP(i)·Vol(i) / Σ Vol(i), anchored at 09:15, warm-up until 09:20.
+  // TP(i)  = underlying_spot_price(t) — H=L=C=spot at tick level.
+  // Vol(i) = ΔCE_vol(i) + ΔPE_vol(i) — per-tick incremental CE+PE volume.
+  // Band   = 0.05% of VWAP — suppresses noise near VWAP (≈11-12 pts on Nifty).
+  const VWAP_WARMUP_END_HHMM = '09:20';
+  const VWAP_BAND_PCT = 0.0005;
+
+  function _computeVwapSignal(spot, vwap) {
+    if (vwap <= 0 || spot <= 0) return 'NEUTRAL';
+    const band = vwap * VWAP_BAND_PCT;
+    if (spot > vwap + band) return 'BUY';
+    if (spot < vwap - band) return 'SELL';
+    return 'NEUTRAL';
+  }
+
   // Build the per-row volume metrics in ascending time order.
   //
   // get_total_volume_series returns the cross-strike DAY-CUMULATIVE CE/PE
-  // volume at each 15s fetch (total_ce_volume = CEcum(t), monotonic). So:
-  //   per-tick (15s) volume  = CEcum(t) - CEcum(t-1)      ← "CE Vol"
+  // volume at each 5s fetch (total_ce_volume = CEcum(t), monotonic). So:
+  //   per-tick (5s) volume   = CEcum(t) - CEcum(t-1)      ← "CE Vol"
   //   cumulative volume      = CEcum(t)                   ← "CE Vol Cum"
   //   volume diff (single)   = PEcum(t) - CEcum(t)        ← "Vol Diff (PE-CE)"
-  // Crossover = sign flip of that single cumulative diff (sampling-independent).
+  //   crossover              = sign flip of that diff      ← "Vol Crossover"
+  //   VWAP(t)               = cumPV / cumVol               ← "VWAP Price"
+  //   VWAP Signal            = spot vs VWAP ± band         ← "VWAP Signal"
   function _computeVolumeMetrics(summaryRows, oiDiffByTs) {
     const out = [];
     let prevCeCum = null, prevPeCum = null;
     let prevVolDiff = null;
-    // OI ROC is a 1-minute metric; track it minute-over-minute and carry the
-    // value across the four 15s volume rows that share a minute.
-    let prevMinuteOiDiff = null;
-    let lastOiMinute = null;
-    let carriedOiRoc = null;
+    // VWAP accumulators — reset daily (already at session-start since rows are market-hours filtered)
+    let cumPV = 0, cumVol = 0;
+    // VWAP signal state-machine (BUY/SELL/NEUTRAL/WARM-UP tracks position)
+    let vwapPosition = 'NEUTRAL';
+
     for (let i = 0; i < summaryRows.length; i++) {
       const r = summaryRows[i];
       const ceCum = r.total_ce_volume || 0;   // day-cumulative CE volume
       const peCum = r.total_pe_volume || 0;   // day-cumulative PE volume
-      // Per-tick (incremental) volume traded in this 15s window
+      const spot  = r.underlying_spot_price || 0;
+      const ts    = r.timestamp || '';
+      const hhmm  = ts.length >= 16 ? ts.slice(11, 16) : '';
+
+      // Per-tick incremental volume
       const ceVol = prevCeCum !== null ? Math.max(0, ceCum - prevCeCum) : ceCum;
       const peVol = prevPeCum !== null ? Math.max(0, peCum - prevPeCum) : peCum;
-      const volDiff = peCum - ceCum;          // single cumulative diff
-      // Volume Difference ROC (15s-over-15s)
-      let volRoc = null;
-      if (prevVolDiff !== null && Math.abs(prevVolDiff) > 0) {
-        volRoc = (volDiff - prevVolDiff) / Math.abs(prevVolDiff) * 100;
-      }
-      // OI Difference ROC (from computed_ticks.oi_difference = PE_cumm - CE_cumm).
-      // Key by minute prefix since volume rows are 15s and OI ticks are :00.
-      const oiKey = typeof r.timestamp === 'string' ? r.timestamp.slice(0, 16) : r.timestamp;
-      const oiDiff = (oiDiffByTs && oiDiffByTs.has(oiKey)) ? oiDiffByTs.get(oiKey) : null;
-      if (oiKey !== lastOiMinute) {
-        // New minute — recompute OI ROC vs the previous minute's OI diff
-        carriedOiRoc = (oiDiff !== null && prevMinuteOiDiff !== null && Math.abs(prevMinuteOiDiff) > 0)
-          ? (oiDiff - prevMinuteOiDiff) / Math.abs(prevMinuteOiDiff) * 100
-          : null;
-        if (oiDiff !== null) prevMinuteOiDiff = oiDiff;
-        lastOiMinute = oiKey;
-      }
-      const oiRoc = carriedOiRoc;
+      const volDiff = peCum - ceCum;
+
+      // Vol crossover (sign flip)
       let crossover = '';
       if (prevVolDiff !== null) {
         if (prevVolDiff < 0 && volDiff >= 0) crossover = 'PE Cross Up';
         else if (prevVolDiff > 0 && volDiff <= 0) crossover = 'CE Cross Up';
       }
-      // Trend / Alert / Confidence keyed off volume ROC (the institutional
-      // participation gauge); OI ROC is an additional confirmation column.
-      const trend = _classifyTrend(volRoc == null ? null : Math.abs(volRoc));
-      const alert = _classifyAlert(trend, volRoc);
+
+      // VWAP accumulation (TP = spot, Vol = incremental CE+PE volume)
+      const tickVol = ceVol + peVol;
+      if (spot > 0 && tickVol > 0) { cumPV += spot * tickVol; cumVol += tickVol; }
+      const vwap = cumVol > 0 ? cumPV / cumVol : 0;
+
+      // VWAP signal state
+      let vwapSig = 'WARM-UP';
+      if (hhmm >= VWAP_WARMUP_END_HHMM && vwap > 0 && spot > 0) {
+        const dir = _computeVwapSignal(spot, vwap);
+        if (dir === 'NEUTRAL') {
+          vwapSig = 'NEUTRAL';
+        } else if (vwapPosition === 'NEUTRAL' || vwapPosition === 'WARM-UP') {
+          vwapSig = dir;               // first directional signal
+          vwapPosition = dir;
+        } else if (dir === vwapPosition) {
+          vwapSig = dir;               // HOLD — remain in same direction
+        } else {
+          // Flip: EXIT current → enter new direction
+          vwapSig = vwapPosition === 'BUY' ? 'EXIT BUY → SELL' : 'EXIT SELL → BUY';
+          vwapPosition = dir;
+        }
+      } else if (hhmm < VWAP_WARMUP_END_HHMM) {
+        vwapSig = 'WARM-UP';
+      }
+
+      // Trend/Alert/Confidence: keep the existing framework but key off vol crossover direction
+      const volAbsRoc = volDiff !== 0 && prevVolDiff !== null && Math.abs(prevVolDiff) > 0
+        ? Math.abs((volDiff - prevVolDiff) / Math.abs(prevVolDiff) * 100) : null;
+      const trend = _classifyTrend(volAbsRoc);
+      const alert = _classifyAlert(trend, volDiff !== 0 && prevVolDiff !== null ? (volDiff - prevVolDiff) : null);
       const confidence = _classifyConfidence(trend);
+
       out.push({
-        timestamp: r.timestamp,
+        timestamp: ts,
         ceVol, peVol, ceCum, peCum, volDiff,
-        oiDiff, oiRoc, volRoc,
+        vwap: vwap > 0 ? vwap : null,
+        vwapSig,
         crossover, trend, alert, confidence,
+        spot: spot || null,
       });
       prevVolDiff = volDiff;
       prevCeCum = ceCum;
@@ -700,16 +736,15 @@ export async function mount(container) {
       const metrics = _computeVolumeMetrics(data.summaryRows, data.oiDiffByTs);
       const headers = [
         'Time', 'CE_Volume', 'PE_Volume', 'CE_Volume_Cumulative', 'PE_Volume_Cumulative',
-        'Volume_Difference_PE_minus_CE', 'ROC_of_Difference', 'ROC_of_Volume_Difference',
+        'Volume_Difference_PE_minus_CE', 'VWAP_Price', 'VWAP_Signal',
         'CE_PE_Volume_Crossover', 'Trend_Strength', 'Alert_Type', 'Confidence_Level',
       ];
       const csvRows = [headers.join(',')];
       for (const m of metrics) {
-        const oiRocStr = m.oiRoc == null ? '' : m.oiRoc.toString();
-        const volRocStr = m.volRoc == null ? '' : m.volRoc.toString();
         csvRows.push([
           m.timestamp, m.ceVol, m.peVol, m.ceCum, m.peCum, m.volDiff,
-          oiRocStr, volRocStr, m.crossover, m.trend, m.alert, m.confidence,
+          m.vwap != null ? m.vwap.toFixed(2) : '', m.vwapSig || '',
+          m.crossover, m.trend, m.alert, m.confidence,
         ].join(','));
       }
       const blob = new Blob([csvRows.join('\n')], { type: 'text/csv' });
@@ -763,10 +798,22 @@ export async function mount(container) {
         ),
       );
 
+      // Find the last non-WARM-UP VWAP signal for the summary badge
+      const lastVwapSig = [...metrics].reverse().find(m => m.vwapSig && m.vwapSig !== 'WARM-UP' && m.vwapSig !== 'NEUTRAL')?.vwapSig || latest.vwapSig;
+      const vwapSigTone = lastVwapSig === 'BUY' ? 'bull'
+        : lastVwapSig === 'SELL' ? 'bear'
+        : lastVwapSig && lastVwapSig.startsWith('EXIT BUY') ? 'neutral'
+        : lastVwapSig && lastVwapSig.startsWith('EXIT SELL') ? 'neutral'
+        : lastVwapSig === 'WARM-UP' ? 'neutral' : 'neutral';
+
       const miniSummary2 = el('div', { style: { display: 'flex', gap: '16px', marginBottom: '16px', flexWrap: 'wrap' } },
-        el('div', { class: 'card', style: { padding: '12px 16px', flex: '1', minWidth: '120px' } },
-          el('span', { class: 'text-xs muted' }, 'ROC Vol Diff'),
-          el('div', { class: `mono ${latest.volRoc == null ? 'dim' : (latest.volRoc >= 0 ? 'bull' : 'bear')}`, style: { fontWeight: '700', fontSize: '16px' } }, latest.volRoc == null ? '—' : ((latest.volRoc >= 0 ? '+' : '') + fmtNum(latest.volRoc, 2) + '%')),
+        el('div', { class: 'card', style: { padding: '12px 16px', flex: '1', minWidth: '130px' } },
+          el('span', { class: 'text-xs muted' }, 'VWAP Price'),
+          el('div', { class: 'mono', style: { fontWeight: '700', fontSize: '16px' } }, latest.vwap != null ? fmtNum(latest.vwap, 2) : '—'),
+        ),
+        el('div', { class: 'card', style: { padding: '12px 16px', flex: '1', minWidth: '130px' } },
+          el('span', { class: 'text-xs muted' }, 'VWAP Position'),
+          el('div', {}, el('span', { class: `change-pill ${vwapSigTone}`, style: { fontSize: '11px', fontWeight: '700' } }, lastVwapSig || '—')),
         ),
         el('div', { class: 'card', style: { padding: '12px 16px', flex: '1', minWidth: '120px' } },
           el('span', { class: 'text-xs muted' }, 'Trend Strength'),
@@ -775,10 +822,6 @@ export async function mount(container) {
         el('div', { class: 'card', style: { padding: '12px 16px', flex: '1', minWidth: '120px' } },
           el('span', { class: 'text-xs muted' }, 'Alert Type'),
           el('div', {}, el('span', { class: `change-pill ${alertTone}`, style: { fontSize: '11px' } }, latest.alert)),
-        ),
-        el('div', { class: 'card', style: { padding: '12px 16px', flex: '1', minWidth: '120px' } },
-          el('span', { class: 'text-xs muted' }, 'Confidence'),
-          el('div', { class: `mono ${latest.confidence === 'High' ? 'bull' : 'dim'}`, style: { fontWeight: '700', fontSize: '16px' } }, latest.confidence),
         ),
       );
 
@@ -803,14 +846,28 @@ export async function mount(container) {
         { key: 'ceCum', label: 'CE Vol Cum', render: r => el('td', { class: 'mono' }, fmtCompact(r.ceCum)) },
         { key: 'peCum', label: 'PE Vol Cum', render: r => el('td', { class: 'mono' }, fmtCompact(r.peCum)) },
         { key: 'volDiff', label: 'Vol Diff (PE−CE)', render: r => el('td', { class: `mono ${r.volDiff >= 0 ? 'bull' : 'bear'}`, style: { fontWeight: '600' } }, (r.volDiff >= 0 ? '+' : '') + fmtCompact(r.volDiff)) },
-        { key: 'oiRoc', label: 'ROC of Diff %', render: r => {
-          if (r.oiRoc == null) return el('td', { class: 'mono dim' }, '—');
-          return el('td', { class: `mono ${r.oiRoc >= 0 ? 'bull' : 'bear'}` }, (r.oiRoc >= 0 ? '+' : '') + fmtNum(r.oiRoc, 2));
+        { key: 'vwap', label: 'VWAP Price', render: r => {
+          if (r.vwap == null) return el('td', { class: 'mono dim' }, '—');
+          return el('td', { class: 'mono' }, fmtNum(r.vwap, 2));
         } },
-        { key: 'volRoc', label: 'ROC of Vol Diff %', render: r => {
-          if (r.volRoc == null) return el('td', { class: 'mono dim' }, '—');
-          return el('td', { class: `mono ${r.volRoc >= 0 ? 'bull' : 'bear'}` }, (r.volRoc >= 0 ? '+' : '') + fmtNum(r.volRoc, 2));
-        } },
+        { key: 'vwapSig', label: 'VWAP Signal', render: r => {
+          const sig = r.vwapSig || '—';
+          const tone = sig === 'BUY' ? 'bull'
+            : sig === 'SELL' ? 'bear'
+            : sig === 'EXIT BUY → SELL' ? 'bear'
+            : sig === 'EXIT SELL → BUY' ? 'bull'
+            : sig === 'WARM-UP' ? 'neutral' : 'neutral';
+          const style = sig === 'EXIT BUY → SELL' ? { background: 'var(--orange, #f5a623)', color: '#000' }
+            : sig === 'EXIT SELL → BUY' ? { background: 'var(--cyan, #00bcd4)', color: '#000' }
+            : sig === 'WARM-UP' ? { background: '#3a5f8a', color: '#fff' } : {};
+          return el('td', {}, el('span', { class: `change-pill ${tone}`, style: { fontSize: '10px', fontWeight: '700', ...style } }, sig));
+        },
+          sortFilter: (rs, dir) => rs
+            .filter(r => r.vwapSig && r.vwapSig !== 'NEUTRAL' && r.vwapSig !== 'WARM-UP')
+            .sort((a, b) => dir === 'asc'
+              ? String(a.timestamp).localeCompare(String(b.timestamp))
+              : String(b.timestamp).localeCompare(String(a.timestamp))),
+        },
         { key: 'crossover', label: 'Vol Crossover', render: r => {
           if (!r.crossover) return el('td', { class: 'mono dim' }, '—');
           const tone = r.crossover === 'PE Cross Up' ? 'bull' : 'bear';

@@ -175,7 +175,7 @@ def _migrate_source_columns(conn: sqlite3.Connection) -> None:
 DEFAULT_CONFIG: dict[str, Any] = {
     "mode": "paper",
     "auto_execute": False,
-    "signal_mode": "oi_only",   # "oi_only" | "volume_only" | "both" (independent)
+    "signal_mode": "oi_only",   # "oi_only" | "volume_only" | "vwap_only" | "both" (independent)
     "cooldown_minutes": 0,
     "instruments": ["nifty"],
     "strike_mode": "atm",
