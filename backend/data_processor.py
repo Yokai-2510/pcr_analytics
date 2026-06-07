@@ -850,14 +850,10 @@ def _ltp_decide(ce_sum: float, pe_sum: float, dir_strength: float,
     return None, "Neutral"
 
 
-def get_ltp_strength_series(instrument: str, date: str, *, itm_depth: int = 3) -> list[dict[str, Any]]:
-    """LTP-Based Option Strength series for the whole day (frontend tab).
-
-    For each 5s tick: ATM, CE_SUM, PE_SUM, DirectionalStrength, RollingStrength
-    (5-min), 5s & 1-min momentum, VWAP + spot, market state, and the strict
-    Current Signal. SessionChange(strike,side) = LTP(t) − referenceLTP, where
-    reference = first market-hours LTP for that strike/side.
-    """
+def _ltp_build(instrument: str, date: str, *, itm_depth: int = 3):
+    """Compute the LTP-strength series + return the loaded structures so the
+    snapshot view can also build a per-strike bucket breakdown without a
+    second scan. Returns (series, by_ts, order, ref_ce, ref_pe, step)."""
     step = _strike_step(instrument)
     # The strategy only ever needs ATM ± itm_depth strikes. ATM shifts a little
     # intraday, so restrict the (expensive) per-strike scan to the day's ATM
@@ -872,7 +868,7 @@ def get_ltp_strength_series(instrument: str, date: str, *, itm_depth: int = 3) -
         (instrument, date),
     )
     if not band or band[0]["lo"] is None:
-        return []
+        return [], {}, [], {}, {}, step
     lo = float(band[0]["lo"]) - itm_depth * step
     hi = float(band[0]["hi"]) + itm_depth * step
     rows = _query(
@@ -888,7 +884,7 @@ def get_ltp_strength_series(instrument: str, date: str, *, itm_depth: int = 3) -
         (instrument, date, lo, hi),
     )
     if not rows:
-        return []
+        return [], {}, [], {}, {}, step
 
     # Group per timestamp: { ts: {atm, spot, ce:{strike:ltp}, pe:{strike:ltp}} }
     by_ts: dict[str, dict[str, Any]] = {}
@@ -992,7 +988,60 @@ def get_ltp_strength_series(instrument: str, date: str, *, itm_depth: int = 3) -
             "market_state": market_state,
             "signal": signal,
         })
-    return out
+    return out, by_ts, order, ref_ce, ref_pe, step
+
+
+def get_ltp_strength_series(instrument: str, date: str, *, itm_depth: int = 3) -> list[dict[str, Any]]:
+    """Whole-day LTP-strength series (used for CSV export)."""
+    return _ltp_build(instrument, date, itm_depth=itm_depth)[0]
+
+
+def get_ltp_strength_snapshot(instrument: str, date: str, *, itm_depth: int = 3) -> dict[str, Any] | None:
+    """Latest LTP-strength state + the per-strike bucket breakdown that builds
+    CE_SUM / PE_SUM. For each of ATM + itm_depth ITM strikes per side:
+    reference LTP (09:15 baseline), current LTP, session change, rolling change.
+    """
+    series, by_ts, order, ref_ce, ref_pe, step = _ltp_build(instrument, date, itm_depth=itm_depth)
+    if not series:
+        return None
+    latest = series[-1]
+    ts = latest["timestamp"]
+    atm = latest["atm"]
+    d = by_ts.get(ts, {"ce": {}, "pe": {}})
+
+    # Find the tick ~5 min before `ts` for the per-strike rolling change.
+    cur_sod = _sod(ts)
+    ref5 = None
+    for t in reversed(order):
+        if _sod(t) <= cur_sod - 300:
+            ref5 = by_ts[t]
+            break
+
+    def bucket(side: str, strikes: list[float], ref_map: dict[float, float]) -> list[dict[str, Any]]:
+        now = d.get(side, {})
+        ago = (ref5 or {}).get(side, {}) if ref5 else {}
+        out = []
+        for i, s in enumerate(strikes):
+            cur = now.get(s)
+            rf = ref_map.get(s)
+            a5 = ago.get(s)
+            out.append({
+                "label": "ATM" if i == 0 else f"{i} ITM",
+                "strike": s,
+                "ref_ltp": round(rf, 2) if rf is not None else None,
+                "cur_ltp": round(cur, 2) if cur is not None else None,
+                "session_change": round(cur - rf, 2) if (cur is not None and rf is not None) else None,
+                "rolling_change": round(cur - a5, 2) if (cur is not None and a5 is not None) else None,
+            })
+        return out
+
+    ce_strikes = [atm - k * step for k in range(itm_depth + 1)]
+    pe_strikes = [atm + k * step for k in range(itm_depth + 1)]
+    snap = dict(latest)
+    snap["ticks"] = len(series)
+    snap["ce_bucket"] = bucket("ce", ce_strikes, ref_ce)
+    snap["pe_bucket"] = bucket("pe", pe_strikes, ref_pe)
+    return snap
 
 
 def get_oi_change_series(instrument: str, date: str, baseline: str) -> list[dict[str, Any]]:

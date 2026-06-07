@@ -217,6 +217,14 @@ def ltp_strength(
     return data_processor.get_ltp_strength_series(_instrument_or_404(instrument), date)
 
 
+@app.get("/api/ltp-strength-snapshot/{instrument}")
+def ltp_strength_snapshot(
+    instrument: str,
+    date: str = Query(default_factory=utils.today_ist),
+) -> dict[str, Any] | None:
+    return data_processor.get_ltp_strength_snapshot(_instrument_or_404(instrument), date)
+
+
 @app.get("/api/option-chain/{instrument}")
 def option_chain(
     instrument: str,

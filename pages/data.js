@@ -952,13 +952,11 @@ export async function mount(container) {
       return;
     }
     try {
-      const raw = await api.ltpStrength(ts.instrument, ts.date);
-      const metrics = filterMarketHours(raw);
-      if (!metrics.length) {
+      const latest = await api.ltpStrengthSnapshot(ts.instrument, ts.date);
+      if (!latest) {
         ltpStrengthContent.innerHTML = '<div class="empty-state">No LTP strength data for this date.</div>';
         return;
       }
-      const latest = metrics[metrics.length - 1];
       const sigInfo = _ltpSignalLabel(latest);
 
       const card = (label, valEl) => el('div', { class: 'card', style: { padding: '12px 16px', flex: '1', minWidth: '120px' } },
@@ -969,6 +967,7 @@ export async function mount(container) {
       // Row 1 — STEP 16 dashboard
       const row1 = el('div', { style: { display: 'flex', gap: '16px', marginBottom: '12px', flexWrap: 'wrap' } },
         card('ATM', el('div', { class: 'mono', style: { fontWeight: '700', fontSize: '16px' } }, String(latest.atm))),
+        card('Spot', el('div', { class: 'mono', style: { fontWeight: '700', fontSize: '16px' } }, fmtNum(latest.spot, 2))),
         card('CE_SUM', num(latest.ce_sum, latest.ce_sum >= 0 ? 'bull' : 'bear')),
         card('PE_SUM', num(latest.pe_sum, latest.pe_sum >= 0 ? 'bull' : 'bear')),
         card('Directional Strength', num(latest.directional_strength, latest.directional_strength >= 0 ? 'bull' : 'bear')),
@@ -978,45 +977,52 @@ export async function mount(container) {
       const row2 = el('div', { style: { display: 'flex', gap: '16px', marginBottom: '16px', flexWrap: 'wrap' } },
         card('5s Momentum', num(latest.momentum_5s, latest.momentum_5s >= 0 ? 'bull' : 'bear')),
         card('1m Momentum', num(latest.momentum_1m, latest.momentum_1m >= 0 ? 'bull' : 'bear')),
-        card('Spot', el('div', { class: 'mono', style: { fontWeight: '700', fontSize: '16px' } }, fmtNum(latest.spot, 2))),
+        card('VWAP', el('div', { class: 'mono', style: { fontWeight: '700', fontSize: '16px' } }, latest.vwap != null ? fmtNum(latest.vwap, 2) : '—')),
         card('VWAP Status', el('div', {}, el('span', { class: `change-pill ${latest.vwap_status === 'Above' ? 'bull' : latest.vwap_status === 'Below' ? 'bear' : 'neutral'}`, style: { fontSize: '11px', fontWeight: '700' } }, latest.vwap_status))),
         card('Current Signal', el('div', {}, el('span', { class: `change-pill ${sigInfo.tone}`, style: { fontSize: '11px', fontWeight: '700' } }, sigInfo.text))),
       );
 
-      // Table — latest at top
-      const rows = [...metrics].reverse().map(r => {
-        const si = _ltpSignalLabel(r);
-        return { ...r, _sigText: si.text, _sigTone: si.tone,
-          signalRank: r.signal === 'BUY' ? 1 : r.signal === 'SELL' ? -1 : 0 };
-      });
-      const signed = (key) => r => el('td', { class: `mono ${r[key] >= 0 ? 'bull' : 'bear'}` }, (r[key] >= 0 ? '+' : '') + fmtNum(r[key], 1));
-      const cols = [
-        { key: 'timestamp', label: 'Time', render: r => el('td', { class: 'mono' }, fmtTimeIST(r.timestamp)) },
-        { key: 'atm', label: 'ATM', render: r => el('td', { class: 'mono' }, String(r.atm)) },
-        { key: 'spot', label: 'Spot', render: r => el('td', { class: 'mono' }, fmtNum(r.spot, 2)) },
-        { key: 'ce_sum', label: 'CE_SUM', render: signed('ce_sum') },
-        { key: 'pe_sum', label: 'PE_SUM', render: signed('pe_sum') },
-        { key: 'directional_strength', label: 'Dir Strength', render: signed('directional_strength') },
-        { key: 'rolling_strength', label: 'Rolling', render: signed('rolling_strength') },
-        { key: 'momentum_5s', label: '5s Mom', render: signed('momentum_5s') },
-        { key: 'momentum_1m', label: '1m Mom', render: signed('momentum_1m') },
-        { key: 'vwap', label: 'VWAP', render: r => r.vwap == null ? el('td', { class: 'mono dim' }, '—') : el('td', { class: 'mono' }, fmtNum(r.vwap, 2)) },
-        { key: 'vwap_status', label: 'VWAP', render: r => el('td', { class: `mono ${r.vwap_status === 'Above' ? 'bull' : r.vwap_status === 'Below' ? 'bear' : 'dim'}` }, r.vwap_status) },
-        { key: 'signalRank', label: 'Signal', render: r =>
-            el('td', {}, el('span', { class: `change-pill ${r._sigTone}`, style: { fontSize: '10px', fontWeight: '700' } }, r._sigText)),
-          sortFilter: (rs, dir) => rs
-            .filter(r => r.signal === 'BUY' || r.signal === 'SELL')
-            .sort((a, b) => dir === 'asc'
-              ? String(a.timestamp).localeCompare(String(b.timestamp))
-              : String(b.timestamp).localeCompare(String(a.timestamp))),
-        },
-      ];
+      // ── Strike-bucket breakdown: how CE_SUM / PE_SUM are built ──
+      // Each side: ATM + 3 ITM strikes with 09:15 baseline LTP, current LTP,
+      // session change (vs baseline) and rolling change (vs 5 min ago).
+      const buildBucket = (title, bucket, sumLabel, sumVal) => {
+        const wrap = el('div', { class: 'card', style: { padding: '14px 16px' } });
+        wrap.appendChild(el('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: '10px' } },
+          el('div', { style: { fontSize: '13px', fontWeight: '700', textTransform: 'uppercase', letterSpacing: '0.5px' } }, title),
+          el('div', { class: `mono ${sumVal >= 0 ? 'bull' : 'bear'}`, style: { fontWeight: '700', fontSize: '15px' } }, `${sumLabel} ${sumVal >= 0 ? '+' : ''}${fmtNum(sumVal, 1)}`),
+        ));
+        const table = el('table', { class: 'data-grid', style: { width: '100%' } });
+        const thead = el('thead'); const hr = el('tr');
+        ['Bucket', 'Strike', 'Baseline LTP', 'Current LTP', 'Session Δ', 'Rolling Δ'].forEach(h => hr.appendChild(el('th', {}, h)));
+        thead.appendChild(hr); table.appendChild(thead);
+        const tbody = el('tbody');
+        (bucket || []).forEach((b, i) => {
+          const tr = el('tr', { style: i === 0 ? { background: 'rgba(255,255,255,0.04)', fontWeight: '600' } : {} });
+          tr.appendChild(el('td', { class: 'mono', style: i === 0 ? { color: 'var(--accent)' } : {} }, b.label));
+          tr.appendChild(el('td', { class: 'mono' }, String(b.strike)));
+          tr.appendChild(el('td', { class: 'mono dim' }, b.ref_ltp != null ? fmtNum(b.ref_ltp, 2) : '—'));
+          tr.appendChild(el('td', { class: 'mono' }, b.cur_ltp != null ? fmtNum(b.cur_ltp, 2) : '—'));
+          tr.appendChild(el('td', { class: `mono ${(b.session_change ?? 0) >= 0 ? 'bull' : 'bear'}` }, b.session_change != null ? (b.session_change >= 0 ? '+' : '') + fmtNum(b.session_change, 2) : '—'));
+          tr.appendChild(el('td', { class: `mono ${(b.rolling_change ?? 0) >= 0 ? 'bull' : 'bear'}` }, b.rolling_change != null ? (b.rolling_change >= 0 ? '+' : '') + fmtNum(b.rolling_change, 2) : '—'));
+          tbody.appendChild(tr);
+        });
+        table.appendChild(tbody); wrap.appendChild(table);
+        return wrap;
+      };
 
-      const t = buildSortableTable(cols, rows);
+      const buckets = el('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' } },
+        buildBucket('Call Strikes (CE)', latest.ce_bucket, 'CE_SUM', latest.ce_sum),
+        buildBucket('Put Strikes (PE)', latest.pe_bucket, 'PE_SUM', latest.pe_sum),
+      );
+
+      const asOf = el('div', { class: 'dim text-xs mono', style: { marginTop: '10px' } },
+        `As of ${fmtTimeIST(latest.timestamp)} · ${latest.ticks} ticks · baseline = first tick @ 09:15 · market state: ${latest.market_state}`);
+
       ltpStrengthContent.innerHTML = '';
       ltpStrengthContent.appendChild(row1);
       ltpStrengthContent.appendChild(row2);
-      ltpStrengthContent.appendChild(el('div', { class: 'data-grid-wrap' }, t));
+      ltpStrengthContent.appendChild(buckets);
+      ltpStrengthContent.appendChild(asOf);
     } catch (e) {
       if (!silent) ltpStrengthContent.innerHTML = `<div class="empty-state"><span class="bear">Failed</span><span class="text-xs mono dim">${e.message}</span></div>`;
     }
