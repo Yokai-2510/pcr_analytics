@@ -198,29 +198,31 @@ function renderEntrySection(cfg) {
   // signal_mode is stored as a comma-joined list of active sources.
   // Legacy single-word values are mapped: 'both'/'combined' -> ['oi','volume'],
   // 'oi_only'->'oi', 'volume_only'->'volume', 'vwap_only'->'vwap'.
+  const SIG_SOURCES = ['oi', 'volume', 'vwap', 'ltp'];
+  const SIG_LABELS = { oi: 'OI', volume: 'Volume', vwap: 'VWAP', ltp: 'LTP Strength' };
   function _parseSources(mode) {
-    const aliases = { oi_only:'oi', volume_only:'volume', vwap_only:'vwap', both:'oi,volume', combined:'oi,volume' };
+    const aliases = { oi_only:'oi', volume_only:'volume', vwap_only:'vwap', ltp_only:'ltp', both:'oi,volume', combined:'oi,volume' };
     const resolved = aliases[mode] || mode || 'oi';
-    return resolved.split(',').map(s => s.trim()).filter(s => s);
+    return resolved.split(',').map(s => s.trim()).filter(s => SIG_SOURCES.includes(s));
   }
   function _sourcesToMode(arr) { return arr.length ? arr.join(',') : 'oi'; }
 
   const activeSources = _parseSources(cfg.signal_mode || 'oi_only');
   const sigChecks = {};
-  ['oi', 'volume', 'vwap'].forEach(src => {
+  SIG_SOURCES.forEach(src => {
     const cb = el('input', { type: 'checkbox', id: `sig_${src}` });
     cb.checked = activeSources.includes(src);
     cb.onchange = () => {
-      const active = ['oi','volume','vwap'].filter(s => sigChecks[s].checked);
+      const active = SIG_SOURCES.filter(s => sigChecks[s].checked);
       cfg.signal_mode = _sourcesToMode(active.length ? active : ['oi']); // at least one
       if (!active.length) sigChecks['oi'].checked = true;
     };
     sigChecks[src] = cb;
   });
   const signalModeEl = el('div', { style: { display: 'flex', gap: '18px', alignItems: 'center', flexWrap: 'wrap' } },
-    ...['oi', 'volume', 'vwap'].map(src => el('label', { style: { display: 'flex', gap: '6px', alignItems: 'center', fontSize: '13px', cursor: 'pointer', fontWeight: 500 } },
+    ...SIG_SOURCES.map(src => el('label', { style: { display: 'flex', gap: '6px', alignItems: 'center', fontSize: '13px', cursor: 'pointer', fontWeight: 500 } },
       sigChecks[src],
-      el('span', {}, src === 'oi' ? 'OI' : src === 'volume' ? 'Volume' : 'VWAP')
+      el('span', {}, SIG_LABELS[src])
     ))
   );
 

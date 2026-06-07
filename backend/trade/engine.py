@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from contextlib import closing
 import logging
-from datetime import datetime, time as dt_time
+from datetime import datetime, time as dt_time, timedelta
 from typing import Any
 
 import data_processor
@@ -315,6 +315,149 @@ def _vwap_signal(
     return last_signal
 
 
+def _ltp_signal(
+    instrument: str,
+    date: str,
+    after_iso: str | None = None,
+) -> dict[str, Any] | None:
+    """Latest LTP-Based Option Strength signal (Dr. Vijay's spec STEP 12/13).
+
+    Computes only the latest tick's strict signal (not the whole-day series)
+    so the per-second engine stays fast:
+        BUY (→CE)  iff CE_SUM>0 & PE_SUM<0 & DirStrength>0 & Rolling>0 & spot>VWAP
+        SELL (→PE) iff CE_SUM<0 & PE_SUM>0 & DirStrength<0 & Rolling<0 & spot<VWAP
+    Otherwise None (market-state quadrant, no actionable trade).
+    """
+    step = data_processor._strike_step(instrument)
+    with closing(data_processor.connect()) as conn:
+        latest = conn.execute(
+            "SELECT MAX(timestamp) AS ts FROM oi_snapshots "
+            "WHERE instrument=? AND substr(timestamp,1,10)=? "
+            "AND substr(timestamp,12,5)>='09:15' AND substr(timestamp,12,5)<='15:30'",
+            (instrument, date),
+        ).fetchone()
+        ts = latest["ts"] if latest else None
+        if not ts:
+            return None
+        head = conn.execute(
+            "SELECT atm_strike, underlying_spot_price FROM oi_snapshots "
+            "WHERE instrument=? AND timestamp=? LIMIT 1",
+            (instrument, ts),
+        ).fetchone()
+        if not head or head["atm_strike"] is None:
+            return None
+        atm = float(head["atm_strike"])
+        spot = utils.safe_float(head["underlying_spot_price"], 0.0) or 0.0
+
+        ce_strikes = [atm - k * step for k in range(4)]   # ATM + 3 ITM (lower)
+        pe_strikes = [atm + k * step for k in range(4)]   # ATM + 3 ITM (higher)
+        strikes = sorted(set(ce_strikes + pe_strikes))
+        ph = ",".join("?" for _ in strikes)
+
+        def fetch_at(stamp: str) -> dict[float, Any]:
+            if not stamp:
+                return {}
+            return {
+                r["strike"]: r
+                for r in conn.execute(
+                    f"SELECT strike, ce_ltp, pe_ltp FROM oi_snapshots "
+                    f"WHERE instrument=? AND timestamp=? AND strike IN ({ph})",
+                    (instrument, stamp, *strikes),
+                ).fetchall()
+            }
+
+        cur = fetch_at(ts)
+        first_ts = conn.execute(
+            "SELECT MIN(timestamp) AS ts FROM oi_snapshots "
+            "WHERE instrument=? AND substr(timestamp,1,10)=? AND substr(timestamp,12,5)>='09:15'",
+            (instrument, date),
+        ).fetchone()["ts"]
+        ref = fetch_at(first_ts)
+
+        try:
+            t5 = (datetime.fromisoformat(ts) - timedelta(minutes=5)).strftime("%H:%M:%S")
+        except ValueError:
+            t5 = None
+        ts5 = None
+        if t5:
+            row5 = conn.execute(
+                "SELECT MAX(timestamp) AS ts FROM oi_snapshots "
+                "WHERE instrument=? AND substr(timestamp,1,10)=? AND substr(timestamp,12,8)<=?",
+                (instrument, date, t5),
+            ).fetchone()
+            ts5 = row5["ts"] if row5 else None
+        ago = fetch_at(ts5) if ts5 else {}
+
+    def _ltp(d: dict, strike: float, col: str):
+        r = d.get(strike)
+        return utils.safe_float(r[col], None) if r else None
+
+    def sess(strikes_list, col):
+        tot = 0.0
+        for s in strikes_list:
+            c = _ltp(cur, s, col)
+            rf = _ltp(ref, s, col)
+            if c is not None and rf is not None:
+                tot += c - rf
+        return tot
+
+    def roll(strikes_list, col):
+        if not ago:
+            return 0.0
+        tot = 0.0
+        for s in strikes_list:
+            c = _ltp(cur, s, col)
+            a = _ltp(ago, s, col)
+            if c is not None and a is not None:
+                tot += c - a
+        return tot
+
+    ce_sum = sess(ce_strikes, "ce_ltp")
+    pe_sum = sess(pe_strikes, "pe_ltp")
+    dir_strength = ce_sum - pe_sum
+    rolling_strength = roll(ce_strikes, "ce_ltp") - roll(pe_strikes, "pe_ltp")
+
+    # VWAP at latest (same session-anchored formula as the volume tab).
+    vwap = 0.0
+    cum_pv = cum_vol = 0.0
+    pce = ppe = None
+    for vr in data_processor.get_total_volume_series(instrument, date):
+        ce = vr.get("total_ce_volume") or 0.0
+        pe = vr.get("total_pe_volume") or 0.0
+        sp = vr.get("underlying_spot_price") or 0.0
+        cd = max(0.0, ce - pce) if pce is not None else ce
+        pd = max(0.0, pe - ppe) if ppe is not None else pe
+        pce, ppe = ce, pe
+        tv = cd + pd
+        if sp > 0 and tv > 0:
+            cum_pv += sp * tv
+            cum_vol += tv
+    if cum_vol > 0:
+        vwap = cum_pv / cum_vol
+
+    signal, _state = data_processor._ltp_decide(
+        ce_sum, pe_sum, dir_strength, rolling_strength, spot, vwap
+    )
+    if signal is None:
+        return None
+    if after_iso and str(ts) <= str(after_iso):
+        return None
+    return {
+        "timestamp": ts,
+        "signal": signal,
+        "ce_sum": ce_sum,
+        "pe_sum": pe_sum,
+        "directional_strength": dir_strength,
+        "rolling_strength": rolling_strength,
+        "vwap": vwap,
+        "spot": spot,
+        "oi_difference": None,
+        "pcr": None,
+        "ce_oi_cumm_change": None,
+        "pe_oi_cumm_change": None,
+    }
+
+
 def _maybe_ratchet_tsl(
     position: dict[str, Any],
     ltp: float,
@@ -450,22 +593,25 @@ def _active_sources(signal_mode: str) -> list[str]:
         "oi_only": ["oi"],
         "volume_only": ["volume"],
         "vwap_only": ["vwap"],
+        "ltp_only": ["ltp"],
         "both": ["oi", "volume"],
         "combined": ["oi", "volume"],
     }
     if mode in aliases:
         return aliases[mode]
-    # Comma-separated list of sources e.g. "oi,vwap"
-    parts = [p.strip() for p in mode.split(",") if p.strip() in ("oi", "volume", "vwap")]
+    # Comma-separated list of sources e.g. "oi,vwap,ltp"
+    parts = [p.strip() for p in mode.split(",") if p.strip() in ("oi", "volume", "vwap", "ltp")]
     return parts if parts else ["oi"]
 
 
 def _source_signal(source: str, instrument: str, date: str, after_iso: str | None = None):
-    """Latest crossover/direction signal for a single source ('oi', 'volume', 'vwap')."""
+    """Latest direction signal for a single source ('oi', 'volume', 'vwap', 'ltp')."""
     if source == "volume":
         return _volume_signal(instrument, date, after_iso)
     if source == "vwap":
         return _vwap_signal(instrument, date, after_iso)
+    if source == "ltp":
+        return _ltp_signal(instrument, date, after_iso)
     return _oi_signal(instrument, date, after_iso)
 
 

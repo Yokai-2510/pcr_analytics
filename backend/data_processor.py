@@ -750,8 +750,17 @@ def get_option_chain_latest(instrument: str, date: str) -> dict[str, Any] | None
         }
 
 
+_VOL_SERIES_CACHE: dict[tuple[str, str], tuple[float, list[dict[str, Any]]]] = {}
+_VOL_SERIES_TTL_S = 2.0
+
+
 def get_total_volume_series(instrument: str, date: str) -> list[dict[str, Any]]:
     """Per-fetch total CE/PE volume across all strikes.
+
+    Cached for a couple of seconds: volume/VWAP/LTP signals each call this on
+    every 1s engine tick, but the underlying data only changes every 5s. The
+    TTL cache collapses those redundant full-day scans without affecting the
+    5s strategy cadence.
 
     Unlike the OI series (1-minute bars via MINUTE_FILTER_SQL), volume is
     returned at the full raw fetch cadence (every 15s) and is NOT floored to
@@ -759,11 +768,18 @@ def get_total_volume_series(instrument: str, date: str) -> list[dict[str, Any]]:
     OI stays minute-level. Each raw fetch lands one timestamp; grouping by
     timestamp aggregates that fetch's strikes.
     """
+    import time as _time
+    ck = (instrument, date)
+    cached = _VOL_SERIES_CACHE.get(ck)
+    now = _time.monotonic()
+    if cached is not None and (now - cached[0]) < _VOL_SERIES_TTL_S:
+        return cached[1]
+
     # Restrict to market hours (09:15–15:30 IST). oi_snapshots also holds a
     # pre-open prev_close baseline fetch (~00:00) whose cumulative volume would
     # otherwise pollute the first row — the frontend strips it too, but doing
     # it here keeps the trade engine's volume crossover identical to the tab.
-    return _query(
+    result = _query(
         """
         SELECT
             timestamp,
@@ -779,6 +795,204 @@ def get_total_volume_series(instrument: str, date: str) -> list[dict[str, Any]]:
         """,
         (instrument, date),
     )
+    _VOL_SERIES_CACHE[ck] = (now, result)
+    return result
+
+
+# ── LTP-Based Option Strength engine (Dr. Vijay's spec) ──────────────────
+
+_STRIKE_STEP_DEFAULTS = {"nifty": 50, "banknifty": 100, "sensex": 100}
+
+
+def _strike_step(instrument: str) -> int:
+    try:
+        cfg = utils.instrument_config(instrument) or {}
+        step = int(cfg.get("strike_step") or 0)
+        if step > 0:
+            return step
+    except Exception:
+        pass
+    return _STRIKE_STEP_DEFAULTS.get(instrument, 50)
+
+
+def _sod(ts: str) -> int:
+    """Seconds-of-day from an ISO timestamp (HH:MM:SS slice)."""
+    try:
+        return int(ts[11:13]) * 3600 + int(ts[14:16]) * 60 + int(ts[17:19])
+    except (ValueError, IndexError):
+        return 0
+
+
+def _ltp_decide(ce_sum: float, pe_sum: float, dir_strength: float,
+                rolling_strength: float, spot: float, vwap: float):
+    """Return (signal, market_state) per spec STEP 11–13.
+
+    signal: 'BUY' (→CE) / 'SELL' (→PE) / None — the strict actionable signal.
+    market_state: the looser STEP 11 quadrant label.
+    """
+    above_vwap = vwap > 0 and spot > vwap
+    below_vwap = vwap > 0 and spot < vwap
+    # STEP 12 — strict BUY CE
+    if ce_sum > 0 and pe_sum < 0 and dir_strength > 0 and rolling_strength > 0 and above_vwap:
+        return "BUY", "BUY CE"
+    # STEP 13 — strict BUY PE
+    if ce_sum < 0 and pe_sum > 0 and dir_strength < 0 and rolling_strength < 0 and below_vwap:
+        return "SELL", "BUY PE"
+    # STEP 11 — market state quadrants
+    if ce_sum > 0 and pe_sum < 0:
+        return None, "BUY CE (unconfirmed)"
+    if ce_sum < 0 and pe_sum > 0:
+        return None, "BUY PE (unconfirmed)"
+    if ce_sum > 0 and pe_sum > 0:
+        return None, "IV Expansion / Wait"
+    if ce_sum < 0 and pe_sum < 0:
+        return None, "IV Crush / Avoid"
+    return None, "Neutral"
+
+
+def get_ltp_strength_series(instrument: str, date: str, *, itm_depth: int = 3) -> list[dict[str, Any]]:
+    """LTP-Based Option Strength series for the whole day (frontend tab).
+
+    For each 5s tick: ATM, CE_SUM, PE_SUM, DirectionalStrength, RollingStrength
+    (5-min), 5s & 1-min momentum, VWAP + spot, market state, and the strict
+    Current Signal. SessionChange(strike,side) = LTP(t) − referenceLTP, where
+    reference = first market-hours LTP for that strike/side.
+    """
+    step = _strike_step(instrument)
+    # The strategy only ever needs ATM ± itm_depth strikes. ATM shifts a little
+    # intraday, so restrict the (expensive) per-strike scan to the day's ATM
+    # range padded by itm_depth steps — ~10 strikes instead of ~100.
+    band = _query(
+        """
+        SELECT MIN(atm_strike) AS lo, MAX(atm_strike) AS hi FROM oi_snapshots
+        WHERE instrument = ? AND substr(timestamp, 1, 10) = ?
+          AND substr(timestamp, 12, 5) >= '09:15' AND substr(timestamp, 12, 5) <= '15:30'
+          AND atm_strike IS NOT NULL
+        """,
+        (instrument, date),
+    )
+    if not band or band[0]["lo"] is None:
+        return []
+    lo = float(band[0]["lo"]) - itm_depth * step
+    hi = float(band[0]["hi"]) + itm_depth * step
+    rows = _query(
+        """
+        SELECT timestamp, strike, atm_strike, underlying_spot_price, ce_ltp, pe_ltp
+        FROM oi_snapshots
+        WHERE instrument = ? AND substr(timestamp, 1, 10) = ?
+          AND substr(timestamp, 12, 5) >= '09:15'
+          AND substr(timestamp, 12, 5) <= '15:30'
+          AND strike >= ? AND strike <= ?
+        ORDER BY timestamp, strike
+        """,
+        (instrument, date, lo, hi),
+    )
+    if not rows:
+        return []
+
+    # Group per timestamp: { ts: {atm, spot, ce:{strike:ltp}, pe:{strike:ltp}} }
+    by_ts: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for r in rows:
+        ts = r["timestamp"]
+        d = by_ts.get(ts)
+        if d is None:
+            d = {"atm": r["atm_strike"], "spot": r["underlying_spot_price"], "ce": {}, "pe": {}}
+            by_ts[ts] = d
+            order.append(ts)
+        if r["ce_ltp"] is not None:
+            d["ce"][r["strike"]] = r["ce_ltp"]
+        if r["pe_ltp"] is not None:
+            d["pe"][r["strike"]] = r["pe_ltp"]
+
+    # Reference LTP per (side, strike) = first market tick it appears in.
+    ref_ce: dict[float, float] = {}
+    ref_pe: dict[float, float] = {}
+    for ts in order:
+        for k, v in by_ts[ts]["ce"].items():
+            ref_ce.setdefault(k, v)
+        for k, v in by_ts[ts]["pe"].items():
+            ref_pe.setdefault(k, v)
+
+    # VWAP per timestamp (same formula as the volume tab / trade engine).
+    vwap_by_ts: dict[str, float] = {}
+    vol_series = get_total_volume_series(instrument, date)
+    cum_pv = cum_vol = 0.0
+    pce = ppe = None
+    for vr in vol_series:
+        ce = vr.get("total_ce_volume") or 0.0
+        pe = vr.get("total_pe_volume") or 0.0
+        spot = vr.get("underlying_spot_price") or 0.0
+        cd = max(0.0, ce - pce) if pce is not None else ce
+        pd = max(0.0, pe - ppe) if ppe is not None else pe
+        pce, ppe = ce, pe
+        tv = cd + pd
+        if spot > 0 and tv > 0:
+            cum_pv += spot * tv
+            cum_vol += tv
+        vwap_by_ts[vr["timestamp"]] = (cum_pv / cum_vol) if cum_vol > 0 else 0.0
+
+    sods = [_sod(ts) for ts in order]
+
+    # Two-pointer indices for "5 min ago" and "1 min ago".
+    out: list[dict[str, Any]] = []
+    dir_vals: list[float] = []
+    j5 = j1 = 0
+    for i, ts in enumerate(order):
+        d = by_ts[ts]
+        atm = d["atm"]
+        spot = d["spot"] or 0.0
+        if atm is None:
+            continue
+        ce_strikes = [atm - k * step for k in range(itm_depth + 1)]  # ATM + ITM (lower)
+        pe_strikes = [atm + k * step for k in range(itm_depth + 1)]  # ATM + ITM (higher)
+
+        def sess(side_now, side_ref, strike):
+            cur = side_now.get(strike)
+            rf = side_ref.get(strike)
+            return (cur - rf) if (cur is not None and rf is not None) else 0.0
+
+        ce_sum = sum(sess(d["ce"], ref_ce, s) for s in ce_strikes)
+        pe_sum = sum(sess(d["pe"], ref_pe, s) for s in pe_strikes)
+        dir_strength = ce_sum - pe_sum
+
+        # Rolling 5-min strength: ΣΔ(CE) − ΣΔ(PE) vs the tick ~5 min ago.
+        while j5 < i and sods[j5] < sods[i] - 300:
+            j5 += 1
+        ref5 = by_ts[order[j5]] if j5 < i else None
+        if ref5 is not None:
+            r_ce = sum((d["ce"].get(s, 0) or 0) - (ref5["ce"].get(s, 0) or 0) for s in ce_strikes)
+            r_pe = sum((d["pe"].get(s, 0) or 0) - (ref5["pe"].get(s, 0) or 0) for s in pe_strikes)
+            rolling_strength = r_ce - r_pe
+        else:
+            rolling_strength = 0.0
+
+        vwap = vwap_by_ts.get(ts, 0.0)
+        signal, market_state = _ltp_decide(ce_sum, pe_sum, dir_strength, rolling_strength, spot, vwap)
+
+        # Momentum of directional strength.
+        mom_5s = dir_strength - dir_vals[i - 1] if i >= 1 else 0.0
+        while j1 < i and sods[j1] < sods[i] - 60:
+            j1 += 1
+        mom_1m = dir_strength - dir_vals[j1] if (j1 < i and dir_vals) else 0.0
+
+        dir_vals.append(dir_strength)
+        out.append({
+            "timestamp": ts,
+            "atm": atm,
+            "spot": round(spot, 2),
+            "ce_sum": round(ce_sum, 2),
+            "pe_sum": round(pe_sum, 2),
+            "directional_strength": round(dir_strength, 2),
+            "rolling_strength": round(rolling_strength, 2),
+            "momentum_5s": round(mom_5s, 2),
+            "momentum_1m": round(mom_1m, 2),
+            "vwap": round(vwap, 2) if vwap else None,
+            "vwap_status": ("Above" if vwap and spot > vwap else "Below" if vwap and spot < vwap else "—"),
+            "market_state": market_state,
+            "signal": signal,
+        })
+    return out
 
 
 def get_oi_change_series(instrument: str, date: str, baseline: str) -> list[dict[str, Any]]:

@@ -102,6 +102,7 @@ const tabState = {
   'oi-analytics': { instrument: 'nifty', date: new Date().toISOString().slice(0, 10) },
   'oi-logs':      { instrument: 'nifty', date: new Date().toISOString().slice(0, 10) },
   'volume-logs':  { instrument: 'nifty', date: new Date().toISOString().slice(0, 10) },
+  'ltp-strength': { instrument: 'nifty', date: new Date().toISOString().slice(0, 10) },
   'sr':           { instrument: 'nifty', date: new Date().toISOString().slice(0, 10) },
   'oi-change-logs':   { instrument: 'nifty', date: new Date().toISOString().slice(0, 10) },
   'entry-signals':    { instrument: 'nifty', date: new Date().toISOString().slice(0, 10) },
@@ -168,6 +169,7 @@ export async function mount(container) {
   const tabBar = el('div', { class: 'tabs', style: { marginBottom: '12px' } });
   const tabs = [
     { id: 'volume-logs', label: 'Volume Logs' },
+    { id: 'ltp-strength', label: 'LTP Strength' },
     { id: 'sr', label: 'S/R' },
     { id: 'oi-change-logs', label: 'OI Change Logs' },
     { id: 'entry-signals', label: 'Entry Signals' },
@@ -187,6 +189,7 @@ export async function mount(container) {
   const oiAnalyticsPanel = el('div', { class: 'tab-panel' });
   const oiLogsPanel = el('div', { class: 'tab-panel' });
   const volumeLogsPanel = el('div', { class: 'tab-panel' });
+  const ltpStrengthPanel = el('div', { class: 'tab-panel' });
   const srPanel = el('div', { class: 'tab-panel' });
   const oiChangeLogsPanel = el('div', { class: 'tab-panel' });
   const entrySignalsPanel = el('div', { class: 'tab-panel' });
@@ -196,6 +199,7 @@ export async function mount(container) {
   // panels are still constructed below (their build code is inert when not
   // appended) but are intentionally not shown.
   page.appendChild(volumeLogsPanel);
+  page.appendChild(ltpStrengthPanel);
   page.appendChild(srPanel);
   page.appendChild(oiChangeLogsPanel);
   page.appendChild(entrySignalsPanel);
@@ -220,6 +224,7 @@ export async function mount(container) {
         ts.date = new Date().toISOString().slice(0, 10);
         dateSelect.refresh(v);
         if (tabId === 'volume-logs') renderVolumeLogs();
+        else if (tabId === 'ltp-strength') renderLtpStrength();
         else if (tabId === 'sr') renderSR();
         else if (tabId === 'oi-change-logs') renderOiChangeLogs();
         else if (tabId === 'entry-signals') renderEntrySignals();
@@ -232,6 +237,7 @@ export async function mount(container) {
       onChange: v => {
         ts.date = v;
         if (tabId === 'volume-logs') renderVolumeLogs();
+        else if (tabId === 'ltp-strength') renderLtpStrength();
         else if (tabId === 'sr') renderSR();
         else if (tabId === 'oi-change-logs') renderOiChangeLogs();
         else if (tabId === 'entry-signals') renderEntrySignals();
@@ -257,10 +263,12 @@ export async function mount(container) {
     activeTab = tabId;
     Object.entries(tabEls).forEach(([id, btn]) => btn.classList.toggle('active', id === tabId));
     volumeLogsPanel.style.display = tabId === 'volume-logs' ? '' : 'none';
+    ltpStrengthPanel.style.display = tabId === 'ltp-strength' ? '' : 'none';
     srPanel.style.display = tabId === 'sr' ? '' : 'none';
     oiChangeLogsPanel.style.display = tabId === 'oi-change-logs' ? '' : 'none';
     entrySignalsPanel.style.display = tabId === 'entry-signals' ? '' : 'none';
     if (tabId === 'volume-logs') renderVolumeLogs();
+    else if (tabId === 'ltp-strength') renderLtpStrength();
     else if (tabId === 'sr') renderSR();
     else if (tabId === 'oi-change-logs') renderOiChangeLogs();
     else if (tabId === 'entry-signals') renderEntrySignals();
@@ -881,6 +889,136 @@ export async function mount(container) {
       volumeLogsContent.appendChild(el('div', { class: 'data-grid-wrap' }, t));
     } catch (e) {
       if (!silent) volumeLogsContent.innerHTML = `<div class="empty-state"><span class="bear">Failed</span><span class="text-xs mono dim">${e.message}</span></div>`;
+    }
+  }
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // LTP STRENGTH TAB — Dr. Vijay's LTP-Based Option Strength engine
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // Per-5s: ATM, CE_SUM / PE_SUM (Σ SessionChange of ATM+3 ITM each side),
+  // Directional Strength (CE_SUM−PE_SUM), Rolling 5-min Strength, 5s & 1-min
+  // momentum, Spot vs VWAP, market state and the strict Current Signal
+  // (BUY CE / BUY PE only when all STEP 12/13 conditions agree).
+  const ltpStrengthContent = el('div');
+  buildTabToolbar(ltpStrengthPanel, 'ltp-strength', (controls) => {
+    const exportBtn = el('button', { class: 'btn secondary sm', onclick: exportLtpStrengthCSV }, 'Export CSV');
+    controls.append(el('div', { class: 'spacer' }), exportBtn);
+  });
+  ltpStrengthPanel.appendChild(ltpStrengthContent);
+
+  function _ltpSignalLabel(r) {
+    // strict actionable signal first, else the market-state quadrant
+    if (r.signal === 'BUY') return { text: 'BUY CALL', tone: 'bull' };
+    if (r.signal === 'SELL') return { text: 'BUY PUT', tone: 'bear' };
+    const s = r.market_state || '—';
+    const tone = s.startsWith('BUY CE') ? 'bull' : s.startsWith('BUY PE') ? 'bear'
+      : s.startsWith('IV Expansion') ? 'neutral' : s.startsWith('IV Crush') ? 'neutral' : 'neutral';
+    return { text: s, tone };
+  }
+
+  async function exportLtpStrengthCSV() {
+    const ts = tabState['ltp-strength'];
+    if (!ts.instrument || !ts.date) { toast('Select instrument and date first', 'error'); return; }
+    toast('Exporting LTP strength…', 'info');
+    try {
+      const rows = await api.ltpStrength(ts.instrument, ts.date);
+      const data = filterMarketHours(rows);
+      if (!data.length) { toast('No data to export', 'error'); return; }
+      const headers = ['Time', 'ATM', 'Spot', 'CE_SUM', 'PE_SUM', 'Directional_Strength',
+        'Rolling_Strength', 'Momentum_5s', 'Momentum_1m', 'VWAP', 'VWAP_Status',
+        'Market_State', 'Current_Signal'];
+      const csv = [headers.join(',')];
+      for (const r of data) {
+        csv.push([r.timestamp, r.atm, r.spot, r.ce_sum, r.pe_sum, r.directional_strength,
+          r.rolling_strength, r.momentum_5s, r.momentum_1m, r.vwap ?? '', r.vwap_status,
+          (r.market_state || '').replace(/,/g, ''),
+          r.signal === 'BUY' ? 'BUY CALL' : r.signal === 'SELL' ? 'BUY PUT' : ''].join(','));
+      }
+      const blob = new Blob([csv.join('\n')], { type: 'text/csv' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `ltp-strength-${ts.instrument}-${ts.date}.csv`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+      toast(`Exported ${data.length} rows`, 'success');
+    } catch (e) { toast('Export failed: ' + e.message, 'error'); }
+  }
+
+  async function renderLtpStrength(silent = false) {
+    if (!silent) ltpStrengthContent.innerHTML = '<div class="dim" style="padding:24px">Loading LTP strength…</div>';
+    const ts = tabState['ltp-strength'];
+    if (!ts.instrument || !ts.date) {
+      ltpStrengthContent.innerHTML = '<div class="empty-state">Select a date to view LTP Strength.</div>';
+      return;
+    }
+    try {
+      const raw = await api.ltpStrength(ts.instrument, ts.date);
+      const metrics = filterMarketHours(raw);
+      if (!metrics.length) {
+        ltpStrengthContent.innerHTML = '<div class="empty-state">No LTP strength data for this date.</div>';
+        return;
+      }
+      const latest = metrics[metrics.length - 1];
+      const sigInfo = _ltpSignalLabel(latest);
+
+      const card = (label, valEl) => el('div', { class: 'card', style: { padding: '12px 16px', flex: '1', minWidth: '120px' } },
+        el('span', { class: 'text-xs muted' }, label), valEl);
+      const num = (v, tone) => el('div', { class: `mono ${tone || ''}`, style: { fontWeight: '700', fontSize: '16px' } },
+        v == null ? '—' : (typeof v === 'number' ? (v >= 0 ? '+' : '') + fmtNum(v, 1) : String(v)));
+
+      // Row 1 — STEP 16 dashboard
+      const row1 = el('div', { style: { display: 'flex', gap: '16px', marginBottom: '12px', flexWrap: 'wrap' } },
+        card('ATM', el('div', { class: 'mono', style: { fontWeight: '700', fontSize: '16px' } }, String(latest.atm))),
+        card('CE_SUM', num(latest.ce_sum, latest.ce_sum >= 0 ? 'bull' : 'bear')),
+        card('PE_SUM', num(latest.pe_sum, latest.pe_sum >= 0 ? 'bull' : 'bear')),
+        card('Directional Strength', num(latest.directional_strength, latest.directional_strength >= 0 ? 'bull' : 'bear')),
+        card('Rolling Strength', num(latest.rolling_strength, latest.rolling_strength >= 0 ? 'bull' : 'bear')),
+      );
+      // Row 2
+      const row2 = el('div', { style: { display: 'flex', gap: '16px', marginBottom: '16px', flexWrap: 'wrap' } },
+        card('5s Momentum', num(latest.momentum_5s, latest.momentum_5s >= 0 ? 'bull' : 'bear')),
+        card('1m Momentum', num(latest.momentum_1m, latest.momentum_1m >= 0 ? 'bull' : 'bear')),
+        card('Spot', el('div', { class: 'mono', style: { fontWeight: '700', fontSize: '16px' } }, fmtNum(latest.spot, 2))),
+        card('VWAP Status', el('div', {}, el('span', { class: `change-pill ${latest.vwap_status === 'Above' ? 'bull' : latest.vwap_status === 'Below' ? 'bear' : 'neutral'}`, style: { fontSize: '11px', fontWeight: '700' } }, latest.vwap_status))),
+        card('Current Signal', el('div', {}, el('span', { class: `change-pill ${sigInfo.tone}`, style: { fontSize: '11px', fontWeight: '700' } }, sigInfo.text))),
+      );
+
+      // Table — latest at top
+      const rows = [...metrics].reverse().map(r => {
+        const si = _ltpSignalLabel(r);
+        return { ...r, _sigText: si.text, _sigTone: si.tone,
+          signalRank: r.signal === 'BUY' ? 1 : r.signal === 'SELL' ? -1 : 0 };
+      });
+      const signed = (key) => r => el('td', { class: `mono ${r[key] >= 0 ? 'bull' : 'bear'}` }, (r[key] >= 0 ? '+' : '') + fmtNum(r[key], 1));
+      const cols = [
+        { key: 'timestamp', label: 'Time', render: r => el('td', { class: 'mono' }, fmtTimeIST(r.timestamp)) },
+        { key: 'atm', label: 'ATM', render: r => el('td', { class: 'mono' }, String(r.atm)) },
+        { key: 'spot', label: 'Spot', render: r => el('td', { class: 'mono' }, fmtNum(r.spot, 2)) },
+        { key: 'ce_sum', label: 'CE_SUM', render: signed('ce_sum') },
+        { key: 'pe_sum', label: 'PE_SUM', render: signed('pe_sum') },
+        { key: 'directional_strength', label: 'Dir Strength', render: signed('directional_strength') },
+        { key: 'rolling_strength', label: 'Rolling', render: signed('rolling_strength') },
+        { key: 'momentum_5s', label: '5s Mom', render: signed('momentum_5s') },
+        { key: 'momentum_1m', label: '1m Mom', render: signed('momentum_1m') },
+        { key: 'vwap', label: 'VWAP', render: r => r.vwap == null ? el('td', { class: 'mono dim' }, '—') : el('td', { class: 'mono' }, fmtNum(r.vwap, 2)) },
+        { key: 'vwap_status', label: 'VWAP', render: r => el('td', { class: `mono ${r.vwap_status === 'Above' ? 'bull' : r.vwap_status === 'Below' ? 'bear' : 'dim'}` }, r.vwap_status) },
+        { key: 'signalRank', label: 'Signal', render: r =>
+            el('td', {}, el('span', { class: `change-pill ${r._sigTone}`, style: { fontSize: '10px', fontWeight: '700' } }, r._sigText)),
+          sortFilter: (rs, dir) => rs
+            .filter(r => r.signal === 'BUY' || r.signal === 'SELL')
+            .sort((a, b) => dir === 'asc'
+              ? String(a.timestamp).localeCompare(String(b.timestamp))
+              : String(b.timestamp).localeCompare(String(a.timestamp))),
+        },
+      ];
+
+      const t = buildSortableTable(cols, rows);
+      ltpStrengthContent.innerHTML = '';
+      ltpStrengthContent.appendChild(row1);
+      ltpStrengthContent.appendChild(row2);
+      ltpStrengthContent.appendChild(el('div', { class: 'data-grid-wrap' }, t));
+    } catch (e) {
+      if (!silent) ltpStrengthContent.innerHTML = `<div class="empty-state"><span class="bear">Failed</span><span class="text-xs mono dim">${e.message}</span></div>`;
     }
   }
 
@@ -1877,6 +2015,7 @@ export async function mount(container) {
   switchTab(activeTab);
   pollTimer = setInterval(() => {
     if (activeTab === 'volume-logs') renderVolumeLogs(true);
+    else if (activeTab === 'ltp-strength') renderLtpStrength(true);
     else if (activeTab === 'sr') renderSR(true);
     else if (activeTab === 'oi-change-logs') renderOiChangeLogs(true);
     else if (activeTab === 'entry-signals') renderEntrySignals(true);
