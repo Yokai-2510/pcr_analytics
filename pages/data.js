@@ -582,11 +582,13 @@ export async function mount(container) {
       if (existing) {
         existing.total_ce_volume += (r.total_ce_volume || r.ce_volume || 0);
         existing.total_pe_volume += (r.total_pe_volume || r.pe_volume || 0);
+        if (!existing.underlying_spot_price) existing.underlying_spot_price = r.underlying_spot_price || 0;
       } else {
         timeMap.set(ts, {
           timestamp: ts,
           total_ce_volume: r.total_ce_volume || r.ce_volume || 0,
           total_pe_volume: r.total_pe_volume || r.pe_volume || 0,
+          underlying_spot_price: r.underlying_spot_price || r.spot || 0,
         });
       }
     });
@@ -624,39 +626,22 @@ export async function mount(container) {
     return (trend === 'Strong' || trend === 'Very Strong') ? 'High' : 'Low';
   }
 
-  // ── VWAP helpers (session-anchored, per the spec) ──────────────────────
-  // VWAP(t) = Σ TP(i)·Vol(i) / Σ Vol(i), anchored at 09:15, warm-up until 09:20.
-  // TP(i)  = underlying_spot_price(t) — H=L=C=spot at tick level.
+  // ── VWAP (session-anchored, per Dr. Vijay's spec) ──────────────────────
+  // VWAP(t) = Σ TP(i)·Vol(i) / Σ Vol(i), anchored at 09:15, reset daily.
+  // TP(i)  = underlying spot price at tick (H=L=C=spot at tick level).
   // Vol(i) = ΔCE_vol(i) + ΔPE_vol(i) — per-tick incremental CE+PE volume.
-  // Band   = 0.05% of VWAP — suppresses noise near VWAP (≈11-12 pts on Nifty).
-  const VWAP_WARMUP_END_HHMM = '09:20';
+  // Band   = 0.05% of VWAP.
+  // Signal: spot > VWAP+band → BUY; spot < VWAP−band → SELL; else NEUTRAL.
+  // Live from 09:15:00 (no warm-up).
   const VWAP_BAND_PCT = 0.0005;
 
-  function _computeVwapSignal(spot, vwap) {
-    if (vwap <= 0 || spot <= 0) return 'NEUTRAL';
-    const band = vwap * VWAP_BAND_PCT;
-    if (spot > vwap + band) return 'BUY';
-    if (spot < vwap - band) return 'SELL';
-    return 'NEUTRAL';
-  }
-
-  // Build the per-row volume metrics in ascending time order.
-  //
-  // get_total_volume_series returns the cross-strike DAY-CUMULATIVE CE/PE
-  // volume at each 5s fetch (total_ce_volume = CEcum(t), monotonic). So:
-  //   per-tick (5s) volume   = CEcum(t) - CEcum(t-1)      ← "CE Vol"
-  //   cumulative volume      = CEcum(t)                   ← "CE Vol Cum"
-  //   volume diff (single)   = PEcum(t) - CEcum(t)        ← "Vol Diff (PE-CE)"
-  //   crossover              = sign flip of that diff      ← "Vol Crossover"
-  //   VWAP(t)               = cumPV / cumVol               ← "VWAP Price"
-  //   VWAP Signal            = spot vs VWAP ± band         ← "VWAP Signal"
   function _computeVolumeMetrics(summaryRows, oiDiffByTs) {
     const out = [];
     let prevCeCum = null, prevPeCum = null;
     let prevVolDiff = null;
-    // VWAP accumulators — reset daily (already at session-start since rows are market-hours filtered)
+    // VWAP accumulators — anchored at session start (rows are market-hours filtered)
     let cumPV = 0, cumVol = 0;
-    // VWAP signal state-machine (BUY/SELL/NEUTRAL/WARM-UP tracks position)
+    // Tracks the active VWAP position so we can label EXIT/flip transitions
     let vwapPosition = 'NEUTRAL';
 
     for (let i = 0; i < summaryRows.length; i++) {
@@ -665,7 +650,6 @@ export async function mount(container) {
       const peCum = r.total_pe_volume || 0;   // day-cumulative PE volume
       const spot  = r.underlying_spot_price || 0;
       const ts    = r.timestamp || '';
-      const hhmm  = ts.length >= 16 ? ts.slice(11, 16) : '';
 
       // Per-tick incremental volume
       const ceVol = prevCeCum !== null ? Math.max(0, ceCum - prevCeCum) : ceCum;
@@ -684,13 +668,14 @@ export async function mount(container) {
       if (spot > 0 && tickVol > 0) { cumPV += spot * tickVol; cumVol += tickVol; }
       const vwap = cumVol > 0 ? cumPV / cumVol : 0;
 
-      // VWAP signal state
-      let vwapSig = 'WARM-UP';
-      if (hhmm >= VWAP_WARMUP_END_HHMM && vwap > 0 && spot > 0) {
-        const dir = _computeVwapSignal(spot, vwap);
+      // VWAP signal — live from the first tick (09:15), no warm-up
+      let vwapSig = 'NEUTRAL';
+      if (vwap > 0 && spot > 0) {
+        const band = vwap * VWAP_BAND_PCT;
+        const dir = spot > vwap + band ? 'BUY' : spot < vwap - band ? 'SELL' : 'NEUTRAL';
         if (dir === 'NEUTRAL') {
           vwapSig = 'NEUTRAL';
-        } else if (vwapPosition === 'NEUTRAL' || vwapPosition === 'WARM-UP') {
+        } else if (vwapPosition === 'NEUTRAL') {
           vwapSig = dir;               // first directional signal
           vwapPosition = dir;
         } else if (dir === vwapPosition) {
@@ -700,8 +685,6 @@ export async function mount(container) {
           vwapSig = vwapPosition === 'BUY' ? 'EXIT BUY → SELL' : 'EXIT SELL → BUY';
           vwapPosition = dir;
         }
-      } else if (hhmm < VWAP_WARMUP_END_HHMM) {
-        vwapSig = 'WARM-UP';
       }
 
       // Trend/Alert/Confidence: keep the existing framework but key off vol crossover direction
@@ -736,15 +719,15 @@ export async function mount(container) {
       const metrics = _computeVolumeMetrics(data.summaryRows, data.oiDiffByTs);
       const headers = [
         'Time', 'CE_Volume', 'PE_Volume', 'CE_Volume_Cumulative', 'PE_Volume_Cumulative',
-        'Volume_Difference_PE_minus_CE', 'VWAP_Price', 'VWAP_Signal',
-        'CE_PE_Volume_Crossover', 'Trend_Strength', 'Alert_Type', 'Confidence_Level',
+        'Volume_Difference_PE_minus_CE', 'Spot_Price', 'VWAP_Price', 'VWAP_Signal',
+        'CE_PE_Volume_Crossover', 'Alert_Type',
       ];
       const csvRows = [headers.join(',')];
       for (const m of metrics) {
         csvRows.push([
           m.timestamp, m.ceVol, m.peVol, m.ceCum, m.peCum, m.volDiff,
-          m.vwap != null ? m.vwap.toFixed(2) : '', m.vwapSig || '',
-          m.crossover, m.trend, m.alert, m.confidence,
+          m.spot != null ? m.spot.toFixed(2) : '', m.vwap != null ? m.vwap.toFixed(2) : '',
+          (m.vwapSig || '').replace(/,/g, ''), m.crossover, m.alert,
         ].join(','));
       }
       const blob = new Blob([csvRows.join('\n')], { type: 'text/csv' });
@@ -798,26 +781,23 @@ export async function mount(container) {
         ),
       );
 
-      // Find the last non-WARM-UP VWAP signal for the summary badge
-      const lastVwapSig = [...metrics].reverse().find(m => m.vwapSig && m.vwapSig !== 'WARM-UP' && m.vwapSig !== 'NEUTRAL')?.vwapSig || latest.vwapSig;
-      const vwapSigTone = lastVwapSig === 'BUY' ? 'bull'
-        : lastVwapSig === 'SELL' ? 'bear'
-        : lastVwapSig && lastVwapSig.startsWith('EXIT BUY') ? 'neutral'
-        : lastVwapSig && lastVwapSig.startsWith('EXIT SELL') ? 'neutral'
-        : lastVwapSig === 'WARM-UP' ? 'neutral' : 'neutral';
+      // Current VWAP position = last directional state (BUY/SELL), else NEUTRAL
+      const lastVwapSig = [...metrics].reverse().find(m => m.vwapSig && m.vwapSig !== 'NEUTRAL')?.vwapSig || 'NEUTRAL';
+      const vwapSigTone = (lastVwapSig === 'BUY' || lastVwapSig === 'EXIT SELL → BUY') ? 'bull'
+        : (lastVwapSig === 'SELL' || lastVwapSig === 'EXIT BUY → SELL') ? 'bear' : 'neutral';
 
       const miniSummary2 = el('div', { style: { display: 'flex', gap: '16px', marginBottom: '16px', flexWrap: 'wrap' } },
+        el('div', { class: 'card', style: { padding: '12px 16px', flex: '1', minWidth: '130px' } },
+          el('span', { class: 'text-xs muted' }, 'Spot Price'),
+          el('div', { class: 'mono', style: { fontWeight: '700', fontSize: '16px' } }, latest.spot != null ? fmtNum(latest.spot, 2) : '—'),
+        ),
         el('div', { class: 'card', style: { padding: '12px 16px', flex: '1', minWidth: '130px' } },
           el('span', { class: 'text-xs muted' }, 'VWAP Price'),
           el('div', { class: 'mono', style: { fontWeight: '700', fontSize: '16px' } }, latest.vwap != null ? fmtNum(latest.vwap, 2) : '—'),
         ),
         el('div', { class: 'card', style: { padding: '12px 16px', flex: '1', minWidth: '130px' } },
           el('span', { class: 'text-xs muted' }, 'VWAP Position'),
-          el('div', {}, el('span', { class: `change-pill ${vwapSigTone}`, style: { fontSize: '11px', fontWeight: '700' } }, lastVwapSig || '—')),
-        ),
-        el('div', { class: 'card', style: { padding: '12px 16px', flex: '1', minWidth: '120px' } },
-          el('span', { class: 'text-xs muted' }, 'Trend Strength'),
-          el('div', {}, el('span', { class: `change-pill ${trendTone}`, style: { fontSize: '11px' } }, latest.trend)),
+          el('div', {}, el('span', { class: `change-pill ${vwapSigTone}`, style: { fontSize: '11px', fontWeight: '700' } }, lastVwapSig)),
         ),
         el('div', { class: 'card', style: { padding: '12px 16px', flex: '1', minWidth: '120px' } },
           el('span', { class: 'text-xs muted' }, 'Alert Type'),
@@ -846,24 +826,25 @@ export async function mount(container) {
         { key: 'ceCum', label: 'CE Vol Cum', render: r => el('td', { class: 'mono' }, fmtCompact(r.ceCum)) },
         { key: 'peCum', label: 'PE Vol Cum', render: r => el('td', { class: 'mono' }, fmtCompact(r.peCum)) },
         { key: 'volDiff', label: 'Vol Diff (PE−CE)', render: r => el('td', { class: `mono ${r.volDiff >= 0 ? 'bull' : 'bear'}`, style: { fontWeight: '600' } }, (r.volDiff >= 0 ? '+' : '') + fmtCompact(r.volDiff)) },
+        { key: 'spot', label: 'Spot Price', render: r => {
+          if (r.spot == null) return el('td', { class: 'mono dim' }, '—');
+          return el('td', { class: 'mono' }, fmtNum(r.spot, 2));
+        } },
         { key: 'vwap', label: 'VWAP Price', render: r => {
           if (r.vwap == null) return el('td', { class: 'mono dim' }, '—');
           return el('td', { class: 'mono' }, fmtNum(r.vwap, 2));
         } },
         { key: 'vwapSig', label: 'VWAP Signal', render: r => {
           const sig = r.vwapSig || '—';
-          const tone = sig === 'BUY' ? 'bull'
-            : sig === 'SELL' ? 'bear'
-            : sig === 'EXIT BUY → SELL' ? 'bear'
-            : sig === 'EXIT SELL → BUY' ? 'bull'
-            : sig === 'WARM-UP' ? 'neutral' : 'neutral';
-          const style = sig === 'EXIT BUY → SELL' ? { background: 'var(--orange, #f5a623)', color: '#000' }
-            : sig === 'EXIT SELL → BUY' ? { background: 'var(--cyan, #00bcd4)', color: '#000' }
-            : sig === 'WARM-UP' ? { background: '#3a5f8a', color: '#fff' } : {};
+          const tone = sig === 'BUY' || sig === 'EXIT SELL → BUY' ? 'bull'
+            : sig === 'SELL' || sig === 'EXIT BUY → SELL' ? 'bear'
+            : 'neutral';
+          const style = sig === 'EXIT BUY → SELL' ? { background: '#f5a623', color: '#000' }
+            : sig === 'EXIT SELL → BUY' ? { background: '#00bcd4', color: '#000' } : {};
           return el('td', {}, el('span', { class: `change-pill ${tone}`, style: { fontSize: '10px', fontWeight: '700', ...style } }, sig));
         },
           sortFilter: (rs, dir) => rs
-            .filter(r => r.vwapSig && r.vwapSig !== 'NEUTRAL' && r.vwapSig !== 'WARM-UP')
+            .filter(r => r.vwapSig && r.vwapSig !== 'NEUTRAL')
             .sort((a, b) => dir === 'asc'
               ? String(a.timestamp).localeCompare(String(b.timestamp))
               : String(b.timestamp).localeCompare(String(a.timestamp))),
@@ -879,12 +860,6 @@ export async function mount(container) {
               ? String(a.timestamp).localeCompare(String(b.timestamp))
               : String(b.timestamp).localeCompare(String(a.timestamp))),
         },
-        { key: 'trendRank', label: 'Trend',
-          render: r => {
-            const tone = (r.trend === 'Very Strong' || r.trend === 'Strong') ? 'bull'
-                       : r.trend === 'Neutral' ? 'neutral' : 'neutral';
-            return el('td', {}, el('span', { class: `change-pill ${tone}`, style: { fontSize: '10px' } }, r.trend));
-          } },
         { key: 'alertRank', label: 'Alert',
           render: r => {
             const tone = r.alert === 'STRONG CE' ? 'bear' : r.alert === 'STRONG PE' ? 'bull' : 'neutral';
@@ -896,8 +871,6 @@ export async function mount(container) {
               ? String(a.timestamp).localeCompare(String(b.timestamp))
               : String(b.timestamp).localeCompare(String(a.timestamp))),
         },
-        { key: 'confRank', label: 'Confidence',
-          render: r => el('td', { class: `mono ${r.confidence === 'High' ? 'bull' : 'dim'}` }, r.confidence) },
       ];
 
       const t = buildSortableTable(cols, display);

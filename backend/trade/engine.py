@@ -237,7 +237,8 @@ def _vwap_signal(
         Vol(t) = ΔCE_vol(t) + ΔPE_vol(t)        (per-tick incremental volume)
         VWAP(t) = Σ TP(i)·Vol(i) / Σ Vol(i)      (session cumulative)
 
-    Signal (only after 09:20 warm-up period):
+    Signal (live from 09:15:00 — no warm-up gate; the first tick has
+    VWAP == spot so it naturally sits inside the band → NEUTRAL):
         spot > VWAP + 0.05%  →  BUY   (enter CE)
         spot < VWAP − 0.05%  →  SELL  (enter PE)
         else                 →  NEUTRAL (no signal)
@@ -247,8 +248,7 @@ def _vwap_signal(
     This mirrors how the trade engine reads OI: "what is the current signal
     direction?" rather than "when did it last flip?".
     """
-    WARMUP_END = "09:20"   # HH:MM — no signals before this
-    BAND_PCT   = 0.0005    # 0.05% band around VWAP
+    BAND_PCT = 0.0005    # 0.05% band around VWAP
 
     series = data_processor.get_total_volume_series(instrument, date)
     if not series:
@@ -285,10 +285,6 @@ def _vwap_signal(
             continue
 
         vwap = cum_pv / cum_vol
-
-        # Warm-up: accumulate VWAP but emit no signal before 09:20
-        if hhmm < WARMUP_END:
-            continue
 
         band = vwap * BAND_PCT
         if spot > vwap + band:
