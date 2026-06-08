@@ -96,6 +96,7 @@ let searchQuery = '';
 let resampleInterval = 'raw';
 let activeTab = 'volume-logs'; // 'volume-logs' | 'sr' | 'oi-change-logs' | 'entry-signals'
 let pollTimer = null;
+let ltpPollTimer = null;
 
 // Per-tab instrument/date state so each tab remembers its own selection
 const tabState = {
@@ -2021,13 +2022,19 @@ export async function mount(container) {
   switchTab(activeTab);
   pollTimer = setInterval(() => {
     if (activeTab === 'volume-logs') renderVolumeLogs(true);
-    else if (activeTab === 'ltp-strength') renderLtpStrength(true);
     else if (activeTab === 'sr') renderSR(true);
     else if (activeTab === 'oi-change-logs') renderOiChangeLogs(true);
     else if (activeTab === 'entry-signals') renderEntrySignals(true);
   }, 60000);
+  // LTP Strength is a live dashboard (CE_SUM / PE_SUM / strength cards), not a
+  // heavy log table — refresh it at the 5s backend feed cadence so the numbers
+  // are always current. Silent render = no loading flash.
+  ltpPollTimer = setInterval(() => {
+    if (activeTab === 'ltp-strength') renderLtpStrength(true);
+  }, 5000);
 }
 
 export function unmount() {
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  if (ltpPollTimer) { clearInterval(ltpPollTimer); ltpPollTimer = null; }
 }

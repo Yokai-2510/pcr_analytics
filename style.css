@@ -893,6 +893,14 @@ table.data tbody tr:hover { background: var(--surface-1); }
   .oi-summary-cards { grid-template-columns: 1fr; }
 }
 
+/* Hand-built grids (S/R side tables, S/R shift history, LTP buckets).
+   Browser default makes <th> center-aligned while <td> stays left, so when a
+   header is wider than its data (e.g. "Resistance" over "23500") the header
+   drifts right of the column's left-aligned values. Force both left so every
+   cell lines up under its header. */
+.data-grid thead th,
+.data-grid tbody td { text-align: left; }
+
 .data-grid-wrap {
   border: 1px solid var(--border);
   border-radius: var(--r-lg);

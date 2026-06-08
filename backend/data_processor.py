@@ -101,8 +101,17 @@ NOT_NULL_COLUMNS = {
 
 def connect() -> sqlite3.Connection:
     utils.db_path().parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(utils.db_path())
+    # timeout: Python-level busy handler so concurrent writers wait instead of
+    # raising "database is locked" instantly (was the worker crash-loop cause).
+    conn = sqlite3.connect(utils.db_path(), timeout=30.0)
     conn.row_factory = sqlite3.Row
+    # WAL lets many readers run concurrently with a single writer; the prior
+    # "delete" journal serialized every access (fetch 5s + trade 1s + compute +
+    # API all collided). busy_timeout is belt-and-suspenders with the connect
+    # timeout. synchronous=NORMAL is the safe/fast pairing for WAL.
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
+    conn.execute("PRAGMA synchronous=NORMAL")
     return conn
 
 
