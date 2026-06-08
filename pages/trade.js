@@ -617,12 +617,18 @@ function paintPositions(card, positions, tab) {
   card.appendChild(table);
 }
 
+// Short source tag for the positions tables. Must cover every signal source —
+// the old inline ternary only knew 'volume' and mislabeled vwap/ltp as "OI".
+function _srcLabel(s) {
+  return ({ oi: 'OI', volume: 'VOL', vwap: 'VWAP', ltp: 'LTP' })[s || 'oi'] || String(s).toUpperCase();
+}
+
 function openRow(p) {
   const ltp = p.live_ltp;
   const pnl = p.unrealized_pnl;
   return el('tr', { class: 'data-row' },
     cell(fmtTime(p.entry_time)),
-    cell(`${p.instrument} · ${(p.source || 'oi') === 'volume' ? 'VOL' : 'OI'}`),
+    cell(`${p.instrument} · ${_srcLabel(p.source)}`),
     cell(p.strike),
     cell(p.option_type, p.option_type === 'CE' ? 'bull' : 'bear'),
     cell(p.qty),
@@ -652,7 +658,7 @@ function closedRow(p) {
   return el('tr', { class: 'data-row' },
     cell(fmtTime(p.entry_time)),
     cell(fmtTime(p.exit_time)),
-    cell(`${p.instrument} · ${(p.source || 'oi') === 'volume' ? 'VOL' : 'OI'}`),
+    cell(`${p.instrument} · ${_srcLabel(p.source)}`),
     cell(p.strike),
     cell(p.option_type, p.option_type === 'CE' ? 'bull' : 'bear'),
     cell(p.qty),

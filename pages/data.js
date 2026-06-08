@@ -679,6 +679,7 @@ export async function mount(container) {
 
       // VWAP signal — live from the first tick (09:15), no warm-up
       let vwapSig = 'NEUTRAL';
+      let vwapCross = '';   // transition-only marker (mirrors the vol `crossover` field)
       if (vwap > 0 && spot > 0) {
         const band = vwap * VWAP_BAND_PCT;
         const dir = spot > vwap + band ? 'BUY' : spot < vwap - band ? 'SELL' : 'NEUTRAL';
@@ -687,12 +688,14 @@ export async function mount(container) {
         } else if (vwapPosition === 'NEUTRAL') {
           vwapSig = dir;               // first directional signal
           vwapPosition = dir;
+          vwapCross = dir;             // entry into a direction
         } else if (dir === vwapPosition) {
           vwapSig = dir;               // HOLD — remain in same direction
         } else {
           // Flip: EXIT current → enter new direction
           vwapSig = vwapPosition === 'BUY' ? 'EXIT BUY → SELL' : 'EXIT SELL → BUY';
           vwapPosition = dir;
+          vwapCross = dir;             // entry into the new direction
         }
       }
 
@@ -707,7 +710,7 @@ export async function mount(container) {
         timestamp: ts,
         ceVol, peVol, ceCum, peCum, volDiff,
         vwap: vwap > 0 ? vwap : null,
-        vwapSig,
+        vwapSig, vwapCross,
         crossover, trend, alert, confidence,
         spot: spot || null,
       });
@@ -1494,9 +1497,8 @@ export async function mount(container) {
   //   OI source     — computed_ticks crossovers (signal BUY/SELL)
   //   Volume source — running-cumulative volume-diff sign flips, identical
   //                   to the Volume Logs "CE/PE Volume Crossover" column
-  // A trigger is "Confirmed" when the other source fired the same direction
-  // within ±5 min — i.e. where the 'combined' signal_mode would enter.
-  const CONFIRM_WINDOW_MS = 5 * 60 * 1000;
+  // Signals from all four strategies (OI / Volume / VWAP / LTP) are shown here
+  // regardless of which are enabled for trading in the config.
   const entrySignalsContent = el('div');
   buildTabToolbar(entrySignalsPanel, 'entry-signals', (controls) => {
     const exportBtn = el('button', { class: 'btn secondary sm', onclick: exportEntrySignalsCSV }, 'Export CSV');
@@ -1505,9 +1507,13 @@ export async function mount(container) {
   entrySignalsPanel.appendChild(entrySignalsContent);
 
   async function _buildEntrySignals(instrument, date) {
-    const [oiRaw, vData] = await Promise.all([
+    // Signals are an ANALYTICS view — generated for ALL four strategies
+    // regardless of which are enabled in the trade config. (The config only
+    // governs whether a signal becomes a real order.)
+    const [oiRaw, vData, ltpRaw] = await Promise.all([
       api.computedTicks(instrument, date).catch(() => []),
       _fetchVolumeData(instrument, date).catch(() => null),
+      api.ltpStrength(instrument, date).catch(() => null),
     ]);
     const ticks = filterMarketHours(Array.isArray(oiRaw) ? oiRaw : (oiRaw.ticks || oiRaw.data || oiRaw.rows || []));
     const oiEvents = ticks
@@ -1529,16 +1535,35 @@ export async function mount(container) {
         metricLabel: 'Vol Diff',
         metricValue: m.volDiff,
       }));
-    const events = [...oiEvents, ...volEvents];
-    // Mark confirmation: opposite source, same direction, within the window
-    events.forEach(e => {
-      const t = new Date(e.timestamp).getTime();
-      e.confirmed = events.some(o =>
-        o.source !== e.source &&
-        o.signal === e.signal &&
-        Math.abs(new Date(o.timestamp).getTime() - t) <= CONFIRM_WINDOW_MS);
-      e.side = e.signal === 'BUY' ? 'CE' : 'PE';
-    });
+    // VWAP: spot crossing the session VWAP band (transition-only marker).
+    const vwapEvents = vMetrics
+      .filter(m => m.vwapCross === 'BUY' || m.vwapCross === 'SELL')
+      .map(m => ({
+        timestamp: m.timestamp,
+        source: 'VWAP',
+        signal: m.vwapCross,
+        metricLabel: 'Spot−VWAP',
+        metricValue: (m.spot != null && m.vwap != null) ? (m.spot - m.vwap) : null,
+      }));
+    // LTP Strength: emit on each directional regime change (per STEP 12/13).
+    const ltpSeries = filterMarketHours(Array.isArray(ltpRaw) ? ltpRaw : (ltpRaw?.series || ltpRaw?.ticks || []));
+    const ltpEvents = [];
+    let prevLtp = null;
+    for (const r of ltpSeries) {
+      const s = (r.signal || '').toUpperCase();
+      if ((s === 'BUY' || s === 'SELL') && s !== prevLtp) {
+        ltpEvents.push({
+          timestamp: r.timestamp,
+          source: 'LTP',
+          signal: s,
+          metricLabel: 'Dir Strength',
+          metricValue: r.directional_strength ?? null,
+        });
+        prevLtp = s;
+      }
+    }
+    const events = [...oiEvents, ...volEvents, ...vwapEvents, ...ltpEvents];
+    events.forEach(e => { e.side = e.signal === 'BUY' ? 'CE' : 'PE'; });
     events.sort((a, b) => String(a.timestamp).localeCompare(String(b.timestamp)));
     return events;
   }
@@ -1550,12 +1575,12 @@ export async function mount(container) {
     try {
       const events = await _buildEntrySignals(ts.instrument, ts.date);
       if (!events.length) { toast('No entry signals to export', 'error'); return; }
-      const headers = ['Time', 'Source', 'Signal', 'Side', 'Metric', 'Metric_Value', 'Confirmed'];
+      const headers = ['Time', 'Source', 'Signal', 'Side', 'Metric', 'Metric_Value'];
       const csvRows = [headers.join(',')];
       for (const e of events) {
         csvRows.push([
           e.timestamp, e.source, e.signal, e.side, e.metricLabel,
-          e.metricValue ?? '', e.confirmed ? 'YES' : 'NO',
+          e.metricValue ?? '',
         ].join(','));
       }
       const blob = new Blob([csvRows.join('\n')], { type: 'text/csv' });
@@ -1583,47 +1608,42 @@ export async function mount(container) {
         entrySignalsContent.innerHTML = '<div class="empty-state">No entry signals for this date.</div>';
         return;
       }
-      const oiCount = events.filter(e => e.source === 'OI').length;
-      const volCount = events.filter(e => e.source === 'Volume').length;
-      const confirmedCount = events.filter(e => e.confirmed).length;
+      const counts = { OI: 0, Volume: 0, VWAP: 0, LTP: 0 };
+      events.forEach(e => { if (counts[e.source] != null) counts[e.source] += 1; });
       const latest = events[events.length - 1];
+      const stat = (label, value, color) => el('div', { style: { borderLeft: '1px solid var(--border)', paddingLeft: '20px' } },
+        el('span', { class: 'text-xs muted' }, label),
+        el('div', { class: 'mono', style: { fontWeight: '700', fontSize: '16px', color: color || 'var(--text)' } }, String(value)),
+      );
 
-      const summaryStrip = el('div', { class: 'card', style: { display: 'flex', gap: '28px', alignItems: 'center', flexWrap: 'wrap', padding: '14px 20px', marginBottom: '16px' } },
+      const summaryStrip = el('div', { class: 'card', style: { display: 'flex', gap: '24px', alignItems: 'center', flexWrap: 'wrap', padding: '14px 20px', marginBottom: '16px' } },
         el('div', {},
-          el('span', { class: 'text-xs muted' }, 'Total Triggers'),
+          el('span', { class: 'text-xs muted' }, 'Total Signals'),
           el('div', { class: 'mono', style: { fontWeight: '700', fontSize: '16px' } }, String(events.length)),
         ),
-        el('div', { style: { borderLeft: '1px solid var(--border)', paddingLeft: '20px' } },
-          el('span', { class: 'text-xs muted' }, 'OI Signals'),
-          el('div', { class: 'mono', style: { fontWeight: '700', fontSize: '16px', color: 'var(--accent)' } }, String(oiCount)),
-        ),
-        el('div', { style: { borderLeft: '1px solid var(--border)', paddingLeft: '20px' } },
-          el('span', { class: 'text-xs muted' }, 'Volume Signals'),
-          el('div', { class: 'mono', style: { fontWeight: '700', fontSize: '16px', color: '#c6c0ff' } }, String(volCount)),
-        ),
-        el('div', { style: { borderLeft: '1px solid var(--border)', paddingLeft: '20px' } },
-          el('span', { class: 'text-xs muted' }, 'Confirmed (combined)'),
-          el('div', { class: 'mono bull', style: { fontWeight: '700', fontSize: '16px' } }, String(confirmedCount)),
-        ),
+        stat('OI', counts.OI, 'var(--accent)'),
+        stat('Volume', counts.Volume, '#c6c0ff'),
+        stat('VWAP', counts.VWAP, '#7fd1ff'),
+        stat('LTP', counts.LTP, '#ffce8a'),
         el('div', { style: { borderLeft: '1px solid var(--border)', paddingLeft: '20px' } },
           el('span', { class: 'text-xs muted' }, 'Latest'),
-          el('div', {}, el('span', { class: `change-pill ${latest.signal === 'BUY' ? 'bull' : 'bear'}`, style: { fontSize: '10px' } }, crossoverLabel(latest.signal))),
+          el('div', {}, el('span', { class: `change-pill ${latest.signal === 'BUY' ? 'bull' : 'bear'}`, style: { fontSize: '10px' } }, `${latest.source} · ${crossoverLabel(latest.signal)}`)),
         ),
       );
 
       // Latest at top
+      const SRC_RANK = { OI: 1, Volume: 2, VWAP: 3, LTP: 4 };
+      const SRC_COLOR = { OI: 'var(--accent)', Volume: '#c6c0ff', VWAP: '#7fd1ff', LTP: '#ffce8a' };
       const rows = [...events].reverse().map(e => ({
         ...e,
-        sourceRank: e.source === 'OI' ? 1 : 0,
+        sourceRank: SRC_RANK[e.source] || 9,
         signalRank: e.signal === 'BUY' ? 1 : -1,
-        confirmedRank: e.confirmed ? 1 : 0,
       }));
 
       const cols = [
         { key: 'timestamp', label: 'Time', render: r => el('td', { class: 'mono' }, fmtTimeIST(r.timestamp)) },
         { key: 'sourceRank', label: 'Source', render: r => {
-          const tone = r.source === 'OI' ? 'neutral' : 'neutral';
-          const color = r.source === 'OI' ? 'var(--accent)' : '#c6c0ff';
+          const color = SRC_COLOR[r.source] || 'var(--text-muted)';
           return el('td', {}, el('span', { class: 'change-pill', style: { fontSize: '10px', fontWeight: '700', color, borderColor: color } }, r.source));
         } },
         { key: 'signalRank', label: 'Signal', render: r =>
@@ -1635,10 +1655,6 @@ export async function mount(container) {
           const tone = r.metricValue >= 0 ? 'bull' : 'bear';
           return el('td', { class: `mono ${tone}` }, `${r.metricLabel}: ${(r.metricValue >= 0 ? '+' : '') + fmtCompact(r.metricValue)}`);
         } },
-        { key: 'confirmedRank', label: 'Confirmed', render: r =>
-          r.confirmed
-            ? el('td', {}, el('span', { class: 'change-pill bull', style: { fontSize: '10px', fontWeight: '700' } }, '✓ both'))
-            : el('td', { class: 'mono dim' }, '—') },
       ];
 
       const t = buildSortableTable(cols, rows);
