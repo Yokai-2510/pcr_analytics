@@ -191,6 +191,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "target_pct": 50,
     "time_exit_enabled": True,
     "time_exit_at": "15:15",
+    "no_entry_after": "15:25",   # stop opening NEW positions this late (intraday
+                                 # churn guard); existing positions still managed
     "max_positions_per_day": 3,
 }
 

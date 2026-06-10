@@ -451,6 +451,13 @@ function renderExitSection(cfg) {
   });
   timeField.querySelector('.form-field-input').classList.add('inline-row');
 
+  const noEntryInput = el('input', { type: 'text', value: cfg.no_entry_after || '15:25', placeholder: 'HH:MM' });
+  noEntryInput.onchange = () => {
+    const v = noEntryInput.value.trim();
+    if (/^\d{2}:\d{2}$/.test(v)) cfg.no_entry_after = v;
+    else { toast('Time must be HH:MM', 'warn'); noEntryInput.value = cfg.no_entry_after || '15:25'; }
+  };
+
   const maxPosInput = el('input', { type: 'number', min: '1', max: '50', value: String(cfg.max_positions_per_day) });
   maxPosInput.onchange = () => {
     cfg.max_positions_per_day = Math.max(1, parseInt(maxPosInput.value, 10) || 1);
@@ -464,6 +471,11 @@ function renderExitSection(cfg) {
         'Closes a CE position when a SELL crossover fires (and vice-versa) — the primary exit rule for this strategy.'),
     }),
     slField, tslField, tgtField, timeField,
+    FormField({
+      label: 'No new entries after',
+      input: [noEntryInput, el('span', { class: 'unit' }, 'IST')],
+      hint: 'Stops opening NEW positions this late so the engine does not churn entries seconds before the 15:30 close. Existing positions are still managed and force-squared-off at EOD.',
+    }),
     FormField({
       label: 'Max positions per day',
       input: [maxPosInput, el('span', { class: 'unit' }, 'trades')],

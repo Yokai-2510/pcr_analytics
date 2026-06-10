@@ -83,20 +83,21 @@ def _evaluate_one_exit(
     qty = int(position["qty"])
 
     ltp = strikes.latest_ltp(instrument, strike, side, today)
-    if ltp is None:
-        # Skip silently; this is normal pre-market or during data gaps.
-        return
 
-    # Priority 0: manual exit (user clicked the Close button)
-    if int(position.get("manual_exit_requested") or 0) == 1:
-        _close(position, "exit_manual", ltp, b)
-        return
-
-    # Priority 1: end-of-day force close
+    # Priority 0/1: forced closes (manual + end-of-day) must fire even if the
+    # live LTP feed has already stopped (e.g. right after 15:30) — otherwise a
+    # position can be left dangling OPEN past the close. Fall back to the entry
+    # price (neutral 0 P&L) when no quote is available.
+    manual = int(position.get("manual_exit_requested") or 0) == 1
     market_close = _parse_hhmm(str(config.get("market_close_time") or "15:30"))
     eod_force = _at_or_after(now, _shift(market_close, seconds=-5))
-    if eod_force:
-        _close(position, "exit_eod", ltp, b)
+    if manual or eod_force:
+        px = ltp if ltp is not None else entry_price
+        _close(position, "exit_manual" if manual else "exit_eod", px, b)
+        return
+
+    if ltp is None:
+        # Normal pre-market / data-gap — skip the non-forced exit checks.
         return
 
     # Priority 2: configured time-based exit
@@ -555,6 +556,24 @@ def _evaluate_entries(
 ) -> None:
     if not config.get("auto_execute"):
         return
+    # Entry cutoff: stop opening NEW positions in the run-up to close. Without
+    # this the engine kept entering at 15:29:55–58 only to EOD-square-off the
+    # same position a few seconds later at +0 P&L (pointless churn) — and an
+    # entry in the final tick could even escape the square-off entirely.
+    # A hard floor of market_close-5s also applies so a misconfig can't reopen
+    # the window where the EOD force-close is already firing.
+    market_close = _parse_hhmm(str(config.get("market_close_time") or "15:30"))
+    cutoff = _shift(market_close, seconds=-5)
+    no_entry_after = str(config.get("no_entry_after") or "").strip()
+    if no_entry_after:
+        try:
+            cfg_cutoff = _parse_hhmm(no_entry_after)
+            if cfg_cutoff < cutoff:
+                cutoff = cfg_cutoff
+        except (ValueError, TypeError):
+            pass
+    if _at_or_after(now, cutoff):
+        return  # silent — no new entries this close to the bell
     instruments = list(config.get("instruments") or [])
     if not instruments:
         return
