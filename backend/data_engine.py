@@ -11,6 +11,7 @@ derived metrics (PCR, OI changes, cumulative changes, signals, etc.)
 from __future__ import annotations
 
 import logging
+from contextlib import closing
 from typing import Any
 
 import data_processor
@@ -214,7 +215,7 @@ def _current_session_position(
         query += " AND timestamp < ?"
         params.append(before_ts)
     query += " ORDER BY timestamp DESC LIMIT 1"
-    with data_processor.connect() as conn:
+    with closing(data_processor.connect()) as conn, conn:
         row = conn.execute(query, tuple(params)).fetchone()
     return row["signal"] if row else None
 
@@ -247,7 +248,7 @@ def _floor_to_minute(ts: str) -> str:
 
 def _get_first_tick_oi(instrument: str, date: str) -> dict[str, float] | None:
     """Get the first tick's total OI for the day (for cumulative change calc)."""
-    with data_processor.connect() as conn:
+    with closing(data_processor.connect()) as conn, conn:
         row = conn.execute(
             """
             SELECT
@@ -269,7 +270,7 @@ def _get_first_tick_oi(instrument: str, date: str) -> dict[str, float] | None:
 
 def get_latest_raw_snapshot(instrument: str, date: str) -> list[dict[str, Any]]:
     """Get the most recent raw snapshot rows for an instrument today."""
-    with data_processor.connect() as conn:
+    with closing(data_processor.connect()) as conn, conn:
         latest_ts = conn.execute(
             """
             SELECT MAX(timestamp) AS ts
@@ -292,7 +293,7 @@ def get_latest_raw_snapshot(instrument: str, date: str) -> list[dict[str, Any]]:
 
 def get_baseline_rows(instrument: str, date: str, baseline_type: str = "post_settlement") -> list[dict[str, Any]]:
     """Get baseline rows for change calculations."""
-    with data_processor.connect() as conn:
+    with closing(data_processor.connect()) as conn, conn:
         rows = conn.execute(
             """
             SELECT * FROM daily_baselines
@@ -320,7 +321,7 @@ def get_prev_computed_tick(
         query += " AND timestamp < ?"
         params.append(before_ts)
     query += " ORDER BY timestamp DESC LIMIT 1"
-    with data_processor.connect() as conn:
+    with closing(data_processor.connect()) as conn, conn:
         row = conn.execute(query, tuple(params)).fetchone()
         return dict(row) if row else None
 
@@ -348,7 +349,7 @@ def save_computed_tick(tick: dict[str, Any]) -> bool:
     col_list = ", ".join(columns)
     placeholders = ", ".join("?" for _ in columns)
 
-    with data_processor.connect() as conn:
+    with closing(data_processor.connect()) as conn, conn:
         conn.execute(
             f"""
             INSERT OR REPLACE INTO computed_ticks ({col_list})
@@ -428,7 +429,7 @@ def recompute_signals_for_date(instrument: str, date: str) -> dict[str, int]:
     close_str = str(cfg.get("market_close_time") or "15:30")
     close_h, close_m = (int(p) for p in close_str.split(":"))
 
-    with data_processor.connect() as conn:
+    with closing(data_processor.connect()) as conn, conn:
         rows = conn.execute(
             """
             SELECT id, timestamp, oi_difference FROM computed_ticks
@@ -496,7 +497,7 @@ def recompute_signals_for_date(instrument: str, date: str) -> dict[str, int]:
 
 def get_computed_ticks(instrument: str, date: str) -> list[dict[str, Any]]:
     """Retrieve all computed ticks for an instrument on a given date."""
-    with data_processor.connect() as conn:
+    with closing(data_processor.connect()) as conn, conn:
         rows = conn.execute(
             """
             SELECT * FROM computed_ticks

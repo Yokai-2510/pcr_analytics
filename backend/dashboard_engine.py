@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import re
 from collections import OrderedDict
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -156,7 +157,7 @@ def distinct_values(
         f"SELECT {select_expr} AS value FROM oi_snapshots "
         f"{clause} ORDER BY value DESC LIMIT {int(limit)}"
     )
-    with data_processor.connect() as conn:
+    with closing(data_processor.connect()) as conn, conn:
         rows = conn.execute(query, tuple(params)).fetchall()
     return [row["value"] for row in rows if row["value"] is not None]
 
@@ -263,7 +264,7 @@ def query_data(payload: dict[str, Any]) -> dict[str, Any]:
     offset = (page - 1) * page_size
     base_query = f"FROM oi_snapshots {where_clause}"
 
-    with data_processor.connect() as conn:
+    with closing(data_processor.connect()) as conn, conn:
         total = conn.execute(f"SELECT COUNT(*) AS n {base_query}", tuple(params)).fetchone()["n"]
         rows = conn.execute(
             f"SELECT {select_columns} {base_query} ORDER BY {order_clause} LIMIT ? OFFSET ?",
@@ -283,7 +284,7 @@ def query_data(payload: dict[str, Any]) -> dict[str, Any]:
 # ── Dashboard summary ─────────────────────────────────────────────────────
 
 def _aggregate_latest_for(instrument: str, date: str) -> dict[str, Any] | None:
-    with data_processor.connect() as conn:
+    with closing(data_processor.connect()) as conn, conn:
         latest = conn.execute(
             """
             SELECT MAX(timestamp) AS ts
@@ -448,7 +449,7 @@ def _aggregate_latest_for(instrument: str, date: str) -> dict[str, Any] | None:
 
 
 def _spark_series(instrument: str, date: str, *, limit: int = 60) -> dict[str, list[Any]]:
-    with data_processor.connect() as conn:
+    with closing(data_processor.connect()) as conn, conn:
         rows = conn.execute(
             f"""
             SELECT timestamp,
@@ -489,7 +490,7 @@ def _market_sentiment(pcr: float | None) -> dict[str, Any]:
 
 def _latest_date_with_data() -> str | None:
     """Return the most recent date that has snapshot data, or None."""
-    with data_processor.connect() as conn:
+    with closing(data_processor.connect()) as conn, conn:
         row = conn.execute(
             "SELECT MAX(substr(timestamp, 1, 10)) AS d FROM oi_snapshots"
         ).fetchone()

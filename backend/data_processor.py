@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import logging
 import sqlite3
+from contextlib import closing
 from typing import Any
 
 import utilities as utils
@@ -165,7 +166,7 @@ COMPUTED_TICK_TEXT_COLUMNS = {"timestamp", "instrument", "signal"}
 
 
 def initialize_storage() -> None:
-    with connect() as conn:
+    with closing(connect()) as conn, conn:
         conn.executescript(
             f"""
             CREATE TABLE IF NOT EXISTS oi_snapshots (
@@ -369,7 +370,7 @@ def write_snapshot(filtered_data: dict[str, dict[str, Any] | None]) -> dict[str,
     if rows:
         columns = ", ".join(SNAPSHOT_COLUMNS)
         placeholders = ", ".join("?" for _ in SNAPSHOT_COLUMNS)
-        with connect() as conn:
+        with closing(connect()) as conn, conn:
             conn.executemany(
                 f"INSERT INTO oi_snapshots ({columns}) VALUES ({placeholders})",
                 rows,
@@ -396,7 +397,7 @@ def persist_market_data(raw_data: dict[str, dict[str, Any] | None]) -> dict[str,
 def count_baseline_rows(baseline_type: str, date: str) -> dict[str, int]:
     """Return how many baseline rows already exist per instrument."""
     counts: dict[str, int] = {}
-    with connect() as conn:
+    with closing(connect()) as conn, conn:
         for instrument in utils.instrument_names():
             row = conn.execute(
                 "SELECT COUNT(*) AS rows FROM daily_baselines "
@@ -413,7 +414,7 @@ def save_baseline(baseline_type: str, date: str | None = None) -> dict[str, int]
 
     baseline_date = date or utils.today_ist()
     counts: dict[str, int] = {}
-    with connect() as conn:
+    with closing(connect()) as conn, conn:
         for instrument in utils.instrument_names():
             if baseline_type in ("post_settlement", "market_open"):
                 existing = conn.execute(
@@ -482,7 +483,7 @@ def save_baseline(baseline_type: str, date: str | None = None) -> dict[str, int]
 
 
 def _query(query: str, params: tuple[Any, ...]) -> list[dict[str, Any]]:
-    with connect() as conn:
+    with closing(connect()) as conn, conn:
         return utils.row_dicts(conn.execute(query, params).fetchall())
 
 
@@ -620,7 +621,7 @@ def get_sr_history(instrument: str, date: str) -> list[dict[str, Any]]:
     Uses a single ORDER BY query and groups by minute in Python — avoids the
     slow JOIN pattern while still producing one snapshot per minute.
     """
-    with connect() as conn:
+    with closing(connect()) as conn, conn:
         rows = conn.execute(
             """
             SELECT timestamp, strike, underlying_spot_price,
@@ -720,7 +721,7 @@ def get_option_chain_latest(instrument: str, date: str) -> dict[str, Any] | None
     in oi_snapshots is already broker-reported day cumulative — no SUM
     needed across timestamps.
     """
-    with connect() as conn:
+    with closing(connect()) as conn, conn:
         latest = conn.execute(
             "SELECT MAX(timestamp) AS ts FROM oi_snapshots "
             "WHERE instrument = ? AND substr(timestamp, 1, 10) = ?",

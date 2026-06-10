@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from contextlib import closing
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -680,7 +681,7 @@ def get_chart_data(config: dict[str, Any]) -> dict[str, Any]:
 
 def get_chart_context(instrument: str, date: str | None = None) -> dict[str, Any]:
     name = utils.normalize_instrument_name(instrument)
-    with data_processor.connect() as conn:
+    with closing(data_processor.connect()) as conn, conn:
         dates = [
             row["date"]
             for row in conn.execute(
@@ -741,7 +742,7 @@ def _chart_row(row: Any) -> dict[str, Any]:
 
 
 def list_saved_charts() -> list[dict[str, Any]]:
-    with data_processor.connect() as conn:
+    with closing(data_processor.connect()) as conn, conn:
         rows = conn.execute(
             """
             SELECT id, name, description, config_json, created_at, updated_at
@@ -753,7 +754,7 @@ def list_saved_charts() -> list[dict[str, Any]]:
 
 
 def get_saved_chart(chart_id: str) -> dict[str, Any] | None:
-    with data_processor.connect() as conn:
+    with closing(data_processor.connect()) as conn, conn:
         row = conn.execute(
             """
             SELECT id, name, description, config_json, created_at, updated_at
@@ -773,7 +774,7 @@ def create_saved_chart(
 ) -> dict[str, Any]:
     chart_id = uuid.uuid4().hex
     now = utils.iso_now()
-    with data_processor.connect() as conn:
+    with closing(data_processor.connect()) as conn, conn:
         conn.execute(
             """
             INSERT INTO chart_configs
@@ -795,7 +796,7 @@ def update_saved_chart(
     config: dict[str, Any],
     description: str | None = None,
 ) -> dict[str, Any] | None:
-    with data_processor.connect() as conn:
+    with closing(data_processor.connect()) as conn, conn:
         result = conn.execute(
             """
             UPDATE chart_configs
@@ -810,6 +811,6 @@ def update_saved_chart(
 
 
 def delete_saved_chart(chart_id: str) -> bool:
-    with data_processor.connect() as conn:
+    with closing(data_processor.connect()) as conn, conn:
         result = conn.execute("DELETE FROM chart_configs WHERE id = ?", (chart_id,))
     return result.rowcount > 0
