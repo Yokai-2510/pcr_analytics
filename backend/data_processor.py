@@ -763,6 +763,21 @@ _VOL_SERIES_CACHE: dict[tuple[str, str], tuple[float, list[dict[str, Any]]]] = {
 _VOL_SERIES_TTL_S = 2.0
 
 
+def _date_bounds(date: str) -> tuple[str, str]:
+    """(date, next_date) for sargable timestamp-range filters.
+
+    ISO timestamps sort lexically, so `timestamp >= date AND timestamp < next`
+    selects exactly one day via the (instrument, timestamp) index — far faster
+    than `substr(timestamp,1,10)=date`, which is non-sargable and scans the
+    instrument's entire multi-day history (the table holds millions of rows)."""
+    from datetime import datetime, timedelta
+    try:
+        nxt = (datetime.strptime(date, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+    except ValueError:
+        nxt = date + "~"  # '~' sorts after 'T...'; still bounds the day
+    return date, nxt
+
+
 def get_total_volume_series(instrument: str, date: str) -> list[dict[str, Any]]:
     """Per-fetch total CE/PE volume across all strikes.
 
@@ -796,13 +811,13 @@ def get_total_volume_series(instrument: str, date: str) -> list[dict[str, Any]]:
             SUM(COALESCE(pe_volume, 0)) AS total_pe_volume,
             AVG(underlying_spot_price) AS underlying_spot_price
         FROM oi_snapshots
-        WHERE instrument = ? AND substr(timestamp, 1, 10) = ?
+        WHERE instrument = ? AND timestamp >= ? AND timestamp < ?
           AND substr(timestamp, 12, 5) >= '09:15'
           AND substr(timestamp, 12, 5) <= '15:30'
         GROUP BY timestamp
         ORDER BY timestamp
         """,
-        (instrument, date),
+        (instrument, *_date_bounds(date)),
     )
     _VOL_SERIES_CACHE[ck] = (now, result)
     return result
@@ -1006,51 +1021,191 @@ def get_ltp_strength_series(instrument: str, date: str, *, itm_depth: int = 3) -
 
 
 def get_ltp_strength_snapshot(instrument: str, date: str, *, itm_depth: int = 3) -> dict[str, Any] | None:
-    """Latest LTP-strength state + the per-strike bucket breakdown that builds
+    """Latest LTP-strength state + per-strike bucket breakdown that builds
     CE_SUM / PE_SUM. For each of ATM + itm_depth ITM strikes per side:
     reference LTP (09:15 baseline), current LTP, session change, rolling change.
+
+    Latest-only: a few single-timestamp lookups (not the whole-day series), so
+    cost is O(1) in tick count. The series build grew to ~11s by mid-session for
+    the heavier instruments — far too slow for the LTP tab's 5s auto-refresh.
     """
-    series, by_ts, order, ref_ce, ref_pe, step = _ltp_build(instrument, date, itm_depth=itm_depth)
-    if not series:
+    from datetime import datetime, timedelta
+    step = _strike_step(instrument)
+    lo, hi = _date_bounds(date)  # sargable day range (uses the timestamp index)
+    rows = _query(
+        "SELECT MAX(timestamp) AS ts FROM oi_snapshots WHERE instrument=? "
+        "AND timestamp>=? AND timestamp<? AND substr(timestamp,12,5)>='09:15' "
+        "AND substr(timestamp,12,5)<='15:30'",
+        (instrument, lo, hi),
+    )
+    ts = rows[0]["ts"] if rows else None
+    if not ts:
         return None
-    latest = series[-1]
-    ts = latest["timestamp"]
-    atm = latest["atm"]
-    d = by_ts.get(ts, {"ce": {}, "pe": {}})
+    head = _query(
+        "SELECT atm_strike, underlying_spot_price FROM oi_snapshots "
+        "WHERE instrument=? AND timestamp=? LIMIT 1",
+        (instrument, ts),
+    )
+    if not head or head[0]["atm_strike"] is None:
+        return None
+    atm = float(head[0]["atm_strike"])
+    spot = utils.safe_float(head[0]["underlying_spot_price"], 0.0) or 0.0
 
-    # Find the tick ~5 min before `ts` for the per-strike rolling change.
-    cur_sod = _sod(ts)
-    ref5 = None
-    for t in reversed(order):
-        if _sod(t) <= cur_sod - 300:
-            ref5 = by_ts[t]
-            break
+    ce_strikes = [atm - k * step for k in range(itm_depth + 1)]  # ATM + ITM (lower)
+    pe_strikes = [atm + k * step for k in range(itm_depth + 1)]  # ATM + ITM (higher)
+    all_strikes = sorted(set(ce_strikes + pe_strikes))
+    ph = ",".join("?" for _ in all_strikes)
 
-    def bucket(side: str, strikes: list[float], ref_map: dict[float, float]) -> list[dict[str, Any]]:
-        now = d.get(side, {})
-        ago = (ref5 or {}).get(side, {}) if ref5 else {}
+    def fetch_at(stamp: str | None) -> dict[float, Any]:
+        if not stamp:
+            return {}
+        return {
+            r["strike"]: r
+            for r in _query(
+                f"SELECT strike, ce_ltp, pe_ltp FROM oi_snapshots "
+                f"WHERE instrument=? AND timestamp=? AND strike IN ({ph})",
+                (instrument, stamp, *all_strikes),
+            )
+        }
+
+    def tick_at_or_before(hms: str | None) -> str | None:
+        if not hms:
+            return None
+        r = _query(
+            "SELECT MAX(timestamp) AS ts FROM oi_snapshots WHERE instrument=? "
+            "AND timestamp>=? AND timestamp<? AND substr(timestamp,12,8)<=?",
+            (instrument, lo, hi, hms),
+        )
+        return r[0]["ts"] if r and r[0]["ts"] else None
+
+    def hms_minus(stamp: str, **kw) -> str | None:
+        try:
+            return (datetime.fromisoformat(stamp) - timedelta(**kw)).strftime("%H:%M:%S")
+        except ValueError:
+            return None
+
+    first_ts = _query(
+        "SELECT MIN(timestamp) AS ts FROM oi_snapshots WHERE instrument=? "
+        "AND timestamp>=? AND timestamp<? AND substr(timestamp,12,5)>='09:15'",
+        (instrument, lo, hi),
+    )[0]["ts"]
+    prev = _query(
+        "SELECT MAX(timestamp) AS ts FROM oi_snapshots WHERE instrument=? "
+        "AND timestamp>=? AND timestamp<? AND substr(timestamp,12,5)>='09:15'",
+        (instrument, lo, ts),
+    )
+    prev_ts = prev[0]["ts"] if prev and prev[0]["ts"] else None
+    ts5 = tick_at_or_before(hms_minus(ts, minutes=5))
+    ts1 = tick_at_or_before(hms_minus(ts, minutes=1))
+
+    cur = fetch_at(ts)
+    ref = fetch_at(first_ts)
+    ago5 = fetch_at(ts5) if (ts5 and ts5 != ts) else {}
+    ago1 = fetch_at(ts1) if (ts1 and ts1 != ts) else {}
+    agoP = fetch_at(prev_ts) if (prev_ts and prev_ts != ts) else {}
+
+    def _ltp(d: dict, s: float, col: str):
+        r = d.get(s)
+        return utils.safe_float(r[col], None) if r else None
+
+    def sess(strikes: list[float], col: str, src: dict) -> float:
+        tot = 0.0
+        for s in strikes:
+            c = _ltp(src, s, col)
+            rf = _ltp(ref, s, col)
+            if c is not None and rf is not None:
+                tot += c - rf
+        return tot
+
+    def roll(strikes: list[float], col: str, ago: dict) -> float:
+        if not ago:
+            return 0.0
+        tot = 0.0
+        for s in strikes:
+            c = _ltp(cur, s, col)
+            a = _ltp(ago, s, col)
+            if c is not None and a is not None:
+                tot += c - a
+        return tot
+
+    ce_sum = sess(ce_strikes, "ce_ltp", cur)
+    pe_sum = sess(pe_strikes, "pe_ltp", cur)
+    dir_strength = ce_sum - pe_sum
+    rolling_strength = roll(ce_strikes, "ce_ltp", ago5) - roll(pe_strikes, "pe_ltp", ago5)
+
+    def dir_at(src: dict):
+        if not src:
+            return None
+        return sess(ce_strikes, "ce_ltp", src) - sess(pe_strikes, "pe_ltp", src)
+
+    dir_prev = dir_at(agoP)
+    dir_1m = dir_at(ago1)
+    momentum_5s = (dir_strength - dir_prev) if dir_prev is not None else 0.0
+    momentum_1m = (dir_strength - dir_1m) if dir_1m is not None else 0.0
+
+    # Session VWAP (same formula as the series / volume tab). The volume series
+    # is aggregated + TTL-cached, so this stays cheap.
+    vwap = 0.0
+    cum_pv = cum_vol = 0.0
+    pce = ppe = None
+    for vr in get_total_volume_series(instrument, date):
+        ce = vr.get("total_ce_volume") or 0.0
+        pe = vr.get("total_pe_volume") or 0.0
+        sp = vr.get("underlying_spot_price") or 0.0
+        cd = max(0.0, ce - pce) if pce is not None else ce
+        pd = max(0.0, pe - ppe) if ppe is not None else pe
+        pce, ppe = ce, pe
+        tv = cd + pd
+        if sp > 0 and tv > 0:
+            cum_pv += sp * tv
+            cum_vol += tv
+    if cum_vol > 0:
+        vwap = cum_pv / cum_vol
+
+    signal, market_state = _ltp_decide(ce_sum, pe_sum, dir_strength, rolling_strength, spot, vwap)
+
+    def bucket(col: str, strikes: list[float], ago: dict) -> list[dict[str, Any]]:
         out = []
         for i, s in enumerate(strikes):
-            cur = now.get(s)
-            rf = ref_map.get(s)
-            a5 = ago.get(s)
+            c = _ltp(cur, s, col)
+            rf = _ltp(ref, s, col)
+            a5 = _ltp(ago, s, col)
             out.append({
                 "label": "ATM" if i == 0 else f"{i} ITM",
                 "strike": s,
                 "ref_ltp": round(rf, 2) if rf is not None else None,
-                "cur_ltp": round(cur, 2) if cur is not None else None,
-                "session_change": round(cur - rf, 2) if (cur is not None and rf is not None) else None,
-                "rolling_change": round(cur - a5, 2) if (cur is not None and a5 is not None) else None,
+                "cur_ltp": round(c, 2) if c is not None else None,
+                "session_change": round(c - rf, 2) if (c is not None and rf is not None) else None,
+                "rolling_change": round(c - a5, 2) if (c is not None and a5 is not None) else None,
             })
         return out
 
-    ce_strikes = [atm - k * step for k in range(itm_depth + 1)]
-    pe_strikes = [atm + k * step for k in range(itm_depth + 1)]
-    snap = dict(latest)
-    snap["ticks"] = len(series)
-    snap["ce_bucket"] = bucket("ce", ce_strikes, ref_ce)
-    snap["pe_bucket"] = bucket("pe", pe_strikes, ref_pe)
-    return snap
+    cnt = _query(
+        "SELECT COUNT(DISTINCT timestamp) AS n FROM oi_snapshots WHERE instrument=? "
+        "AND timestamp>=? AND timestamp<? AND substr(timestamp,12,5)>='09:15' "
+        "AND substr(timestamp,12,5)<='15:30'",
+        (instrument, lo, hi),
+    )
+    ticks = cnt[0]["n"] if cnt else 0
+
+    return {
+        "timestamp": ts,
+        "atm": atm,
+        "spot": round(spot, 2),
+        "ce_sum": round(ce_sum, 2),
+        "pe_sum": round(pe_sum, 2),
+        "directional_strength": round(dir_strength, 2),
+        "rolling_strength": round(rolling_strength, 2),
+        "momentum_5s": round(momentum_5s, 2),
+        "momentum_1m": round(momentum_1m, 2),
+        "vwap": round(vwap, 2) if vwap else None,
+        "vwap_status": ("Above" if vwap and spot > vwap else "Below" if vwap and spot < vwap else "—"),
+        "market_state": market_state,
+        "signal": signal,
+        "ticks": ticks,
+        "ce_bucket": bucket("ce_ltp", ce_strikes, ago5),
+        "pe_bucket": bucket("pe_ltp", pe_strikes, ago5),
+    }
 
 
 def get_oi_change_series(instrument: str, date: str, baseline: str) -> list[dict[str, Any]]:

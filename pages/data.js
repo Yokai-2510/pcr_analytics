@@ -2043,11 +2043,12 @@ export async function mount(container) {
     else if (activeTab === 'entry-signals') renderEntrySignals(true);
   }, 60000);
   // LTP Strength is a live dashboard (CE_SUM / PE_SUM / strength cards), not a
-  // heavy log table — refresh it at the 5s backend feed cadence so the numbers
-  // are always current. Silent render = no loading flash.
+  // heavy log table — refresh it close to the 5s backend feed cadence so the
+  // numbers stay current. 8s (vs 5s) leaves headroom for the heavier
+  // instruments' snapshot query without overlapping requests. Silent render.
   ltpPollTimer = setInterval(() => {
     if (activeTab === 'ltp-strength') renderLtpStrength(true);
-  }, 5000);
+  }, 8000);
 }
 
 export function unmount() {

@@ -2,7 +2,9 @@
 import { store } from './store.js';
 import { toast } from './components.js';
 
-const DEFAULT_TIMEOUT = 15000; // 15s for normal requests
+const DEFAULT_TIMEOUT = 30000; // 30s — whole-day analytics endpoints (entry
+                               // signals, dashboard) legitimately grow with the
+                               // session's 5s-tick count toward late afternoon.
 const AUTH_TIMEOUT = 10000;    // 10s for auth
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = DEFAULT_TIMEOUT) {
