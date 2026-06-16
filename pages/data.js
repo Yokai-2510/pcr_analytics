@@ -1063,7 +1063,10 @@ export async function mount(container) {
   //   * WTB (Weak Towards Bottom): strike BELOW primary support has avg pct >75
   //   * Intraday shift history is accumulated client-side per (instr, date)
   const srContent = el('div');
-  buildTabToolbar(srPanel, 'sr');
+  buildTabToolbar(srPanel, 'sr', (controls) => {
+    const exportBtn = el('button', { class: 'btn secondary sm', onclick: exportSrCSV }, 'Export CSV');
+    controls.append(el('div', { class: 'spacer' }), exportBtn);
+  });
   srPanel.appendChild(srContent);
 
   function _srPickPair(spot, strikes) {
@@ -1156,6 +1159,71 @@ export async function mount(container) {
     }
     hist.push({ ...snapshot, direction });
     return hist;
+  }
+
+  async function exportSrCSV() {
+    const ts = tabState['sr'];
+    if (!ts.instrument || !ts.date) { toast('Select instrument and date first', 'error'); return; }
+    toast('Exporting S/R…', 'info');
+    try {
+      const payload = await api.optionChain(ts.instrument, ts.date);
+      if (!payload || !payload.strikes?.length) { toast('No option-chain data to export', 'error'); return; }
+      const spot = payload.spot_price;
+      const pair = _srPickPair(spot, payload.strikes);
+      if (!pair) { toast('Could not bracket spot with strikes', 'error'); return; }
+      const ceData = _srPercentRows(_srScan(pair, 'CE'), 'CE');
+      const peData = _srPercentRows(_srScan(pair, 'PE'), 'PE');
+      const primaryResistance = ceData.rows[ceData.primaryIdx]?.strike;
+      const primarySupport = peData.rows[peData.primaryIdx]?.strike;
+      const isWTT = _srWeakness(ceData.rows, ceData.primaryIdx);
+      const isWTB = _srWeakness(peData.rows, peData.primaryIdx);
+
+      let hist = srShiftHistory.get(_srHistoryKey(ts.instrument, ts.date));
+      if (!hist || !hist.length) {
+        try { const bf = await api.srHistory(ts.instrument, ts.date); if (Array.isArray(bf)) hist = bf; } catch (_) {}
+      }
+      hist = hist || [];
+
+      const esc = (v) => { const s = String(v ?? ''); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+      const pct = (v) => (v != null ? v.toFixed(0) : '');
+      const lines = [];
+      lines.push(['Support/Resistance', ts.instrument.toUpperCase(), ts.date].map(esc).join(','));
+      lines.push(['As of', fmtTimeIST(payload.timestamp)].map(esc).join(','));
+      lines.push(['Spot', spot ?? ''].map(esc).join(','));
+      lines.push(['Imaginary Pair', `${pair.lower.strike} / ${pair.upper.strike}`].map(esc).join(','));
+      lines.push(['Resistance', primaryResistance ?? '', isWTT ? 'WTT' : 'Firm'].map(esc).join(','));
+      lines.push(['Support', primarySupport ?? '', isWTB ? 'WTB' : 'Firm'].map(esc).join(','));
+      lines.push('');
+
+      const scanHeader = ['Strike', 'OI', 'Vol', 'Chg_OI', 'OI_%', 'Vol_%', 'Chg_OI_%', 'Primary'].join(',');
+      const scanRow = (r, primary) => [r.strike, r.oi ?? '', r.vol ?? '', r.chg ?? '',
+        pct(r.oiPct), pct(r.volPct), pct(r.chgPct), primary ? 'YES' : ''].map(esc).join(',');
+
+      lines.push('RESISTANCE (CE SCAN)');
+      lines.push(scanHeader);
+      ceData.rows.forEach((r, i) => lines.push(scanRow(r, i === ceData.primaryIdx)));
+      lines.push('');
+      lines.push('SUPPORT (PE SCAN)');
+      lines.push(scanHeader);
+      peData.rows.forEach((r, i) => lines.push(scanRow(r, i === peData.primaryIdx)));
+      lines.push('');
+
+      lines.push('INTRADAY SHIFT HISTORY');
+      lines.push(['Time', 'Spot', 'Pair', 'Support', 'Resistance', 'WTB', 'WTT', 'Direction'].join(','));
+      hist.forEach(h => lines.push([fmtTimeIST(h.timestamp), h.spot ?? '',
+        `${h.pairLow}/${h.pairHigh}`, h.support ?? '', h.resistance ?? '',
+        h.wtb ? 'WTB' : '', h.wtt ? 'WTT' : '', h.direction || ''].map(esc).join(',')));
+
+      const blob = new Blob([lines.join('\n')], { type: 'text/csv' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `sr-${ts.instrument}-${ts.date}.csv`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+      toast(`Exported S/R (${hist.length} shifts)`, 'success');
+    } catch (e) {
+      toast('Export failed: ' + e.message, 'error');
+    }
   }
 
   async function renderSR(silent = false) {
