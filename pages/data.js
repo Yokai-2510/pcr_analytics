@@ -675,7 +675,7 @@ export async function mount(container) {
       const ceVol = prevBandCe !== null ? Math.max(0, ceCum - prevBandCe) : ceCum;
       const peVol = prevBandPe !== null ? Math.max(0, peCum - prevBandPe) : peCum;
       const volDiff = peCum - ceCum;                  // VOL DIFF = PE − CE (band)
-      const volPcr = ceCum > 0 ? peCum / ceCum : null;    // Volume PCR = PE / CE
+      const volPcr = peCum > 0 ? ceCum / peCum : null;    // Volume PCR = Cu.CE / Cu.PE
 
       // Direction per spec: VOL DIFF −ve → BUY (CE); +ve → SELL (PE). Transition
       // marker fires on the first directional reading (09:15 seed) + each flip.
@@ -855,7 +855,7 @@ export async function mount(container) {
         { key: 'volDiff', label: 'Vol Diff (PE−CE)', render: r => el('td', { class: `mono ${r.volDiff < 0 ? 'bull' : 'bear'}`, style: { fontWeight: '600' } }, (r.volDiff >= 0 ? '+' : '') + fmtCompact(r.volDiff)) },
         { key: 'volPcr', label: 'Volume PCR', render: r => {
           if (r.volPcr == null) return el('td', { class: 'mono dim' }, '—');
-          return el('td', { class: `mono ${r.volPcr > 1 ? 'bear' : 'bull'}`, style: { fontWeight: '600' } }, fmtNum(r.volPcr, 2));
+          return el('td', { class: `mono ${r.volPcr > 1 ? 'bull' : 'bear'}`, style: { fontWeight: '600' } }, fmtNum(r.volPcr, 2));
         } },
         { key: 'spot', label: 'Spot Price', render: r => {
           if (r.spot == null) return el('td', { class: 'mono dim' }, '—');
