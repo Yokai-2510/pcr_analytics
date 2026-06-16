@@ -417,6 +417,19 @@ select option { background: #14141c; color: var(--text); padding: 8px; }
   box-shadow: 0 4px 14px -4px rgba(198,192,255,0.4);
 }
 
+/* ---- RadioGroup (single-select) ---- */
+.radio-group { display: flex; gap: 18px; flex-wrap: wrap; align-items: center; }
+.radio-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text);
+  user-select: none;
+}
+.radio-option input[type="radio"] { accent-color: var(--accent); width: 15px; height: 15px; cursor: pointer; }
+
 /* ---- Login screen ---- */
 .login-screen {
   position: fixed;

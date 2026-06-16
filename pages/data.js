@@ -591,12 +591,18 @@ export async function mount(container) {
       if (existing) {
         existing.total_ce_volume += (r.total_ce_volume || r.ce_volume || 0);
         existing.total_pe_volume += (r.total_pe_volume || r.pe_volume || 0);
+        existing.atm_ce_volume += (r.atm_ce_volume || 0);
+        existing.atm_pe_volume += (r.atm_pe_volume || 0);
         if (!existing.underlying_spot_price) existing.underlying_spot_price = r.underlying_spot_price || 0;
       } else {
         timeMap.set(ts, {
           timestamp: ts,
+          // all-strikes totals (used for VWAP) + ATM±5-OTM band (the scanner)
           total_ce_volume: r.total_ce_volume || r.ce_volume || 0,
           total_pe_volume: r.total_pe_volume || r.pe_volume || 0,
+          atm_ce_volume: r.atm_ce_volume || 0,
+          atm_pe_volume: r.atm_pe_volume || 0,
+          atm_strike: r.atm_strike || null,
           underlying_spot_price: r.underlying_spot_price || r.spot || 0,
         });
       }
@@ -646,8 +652,11 @@ export async function mount(container) {
 
   function _computeVolumeMetrics(summaryRows, oiDiffByTs) {
     const out = [];
-    let prevCeCum = null, prevPeCum = null;
+    // Scanner volume = ATM ±5-OTM band; VWAP keeps the all-strikes totals.
+    let prevBandCe = null, prevBandPe = null;
+    let prevTotCe = null, prevTotPe = null;
     let prevVolDiff = null;
+    let prevVolState = null;   // last directional state for the band crossover
     // VWAP accumulators — anchored at session start (rows are market-hours filtered)
     let cumPV = 0, cumVol = 0;
     // Tracks the active VWAP position so we can label EXIT/flip transitions
@@ -655,25 +664,30 @@ export async function mount(container) {
 
     for (let i = 0; i < summaryRows.length; i++) {
       const r = summaryRows[i];
-      const ceCum = r.total_ce_volume || 0;   // day-cumulative CE volume
-      const peCum = r.total_pe_volume || 0;   // day-cumulative PE volume
+      const ceCum = r.atm_ce_volume || 0;    // ATM±5 band cumulative CE volume
+      const peCum = r.atm_pe_volume || 0;    // ATM±5 band cumulative PE volume
+      const totCe = r.total_ce_volume || 0;  // all-strikes (VWAP only)
+      const totPe = r.total_pe_volume || 0;
       const spot  = r.underlying_spot_price || 0;
       const ts    = r.timestamp || '';
 
-      // Per-tick incremental volume
-      const ceVol = prevCeCum !== null ? Math.max(0, ceCum - prevCeCum) : ceCum;
-      const peVol = prevPeCum !== null ? Math.max(0, peCum - prevPeCum) : peCum;
-      const volDiff = peCum - ceCum;
+      // Per-tick band volume (clamped: dynamic ATM can drop a strike from the band)
+      const ceVol = prevBandCe !== null ? Math.max(0, ceCum - prevBandCe) : ceCum;
+      const peVol = prevBandPe !== null ? Math.max(0, peCum - prevBandPe) : peCum;
+      const volDiff = peCum - ceCum;                  // VOL DIFF = PE − CE (band)
+      const volPcr = ceCum > 0 ? peCum / ceCum : null;    // Volume PCR = PE / CE
 
-      // Vol crossover (sign flip)
-      let crossover = '';
-      if (prevVolDiff !== null) {
-        if (prevVolDiff < 0 && volDiff >= 0) crossover = 'PE Cross Up';
-        else if (prevVolDiff > 0 && volDiff <= 0) crossover = 'CE Cross Up';
-      }
+      // Direction per spec: VOL DIFF −ve → BUY (CE); +ve → SELL (PE). Transition
+      // marker fires on the first directional reading (09:15 seed) + each flip.
+      const volState = volDiff < 0 ? 'BUY' : volDiff > 0 ? 'SELL' : null;
+      let volCross = '';
+      if (volState && volState !== prevVolState) { volCross = volState; prevVolState = volState; }
+      const crossover = volCross === 'BUY' ? 'BUY CE' : volCross === 'SELL' ? 'BUY PE' : '';
 
-      // VWAP accumulation (TP = spot, Vol = incremental CE+PE volume)
-      const tickVol = ceVol + peVol;
+      // VWAP accumulation — TP = spot, Vol = incremental ALL-STRIKES CE+PE volume
+      const totCeVol = prevTotCe !== null ? Math.max(0, totCe - prevTotCe) : totCe;
+      const totPeVol = prevTotPe !== null ? Math.max(0, totPe - prevTotPe) : totPe;
+      const tickVol = totCeVol + totPeVol;
       if (spot > 0 && tickVol > 0) { cumPV += spot * tickVol; cumVol += tickVol; }
       const vwap = cumVol > 0 ? cumPV / cumVol : 0;
 
@@ -708,15 +722,15 @@ export async function mount(container) {
 
       out.push({
         timestamp: ts,
-        ceVol, peVol, ceCum, peCum, volDiff,
+        ceVol, peVol, ceCum, peCum, volDiff, volPcr,
         vwap: vwap > 0 ? vwap : null,
         vwapSig, vwapCross,
-        crossover, trend, alert, confidence,
+        crossover, volCross, trend, alert, confidence,
         spot: spot || null,
       });
       prevVolDiff = volDiff;
-      prevCeCum = ceCum;
-      prevPeCum = peCum;
+      prevBandCe = ceCum; prevBandPe = peCum;
+      prevTotCe = totCe; prevTotPe = totPe;
     }
     return out;
   }
@@ -731,13 +745,14 @@ export async function mount(container) {
       const metrics = _computeVolumeMetrics(data.summaryRows, data.oiDiffByTs);
       const headers = [
         'Time', 'CE_Volume', 'PE_Volume', 'CE_Volume_Cumulative', 'PE_Volume_Cumulative',
-        'Volume_Difference_PE_minus_CE', 'Spot_Price', 'VWAP_Price', 'VWAP_Signal',
-        'CE_PE_Volume_Crossover', 'Alert_Type',
+        'Volume_Difference_PE_minus_CE', 'Volume_PCR', 'Spot_Price', 'VWAP_Price', 'VWAP_Signal',
+        'Vol_Crossover', 'Alert_Type',
       ];
       const csvRows = [headers.join(',')];
       for (const m of metrics) {
         csvRows.push([
           m.timestamp, m.ceVol, m.peVol, m.ceCum, m.peCum, m.volDiff,
+          m.volPcr != null ? m.volPcr.toFixed(2) : '',
           m.spot != null ? m.spot.toFixed(2) : '', m.vwap != null ? m.vwap.toFixed(2) : '',
           (m.vwapSig || '').replace(/,/g, ''), m.crossover, m.alert,
         ].join(','));
@@ -785,7 +800,7 @@ export async function mount(container) {
         ),
         el('div', { class: 'card', style: { padding: '12px 16px', flex: '1', minWidth: '120px' } },
           el('span', { class: 'text-xs muted' }, 'Vol Diff (PE−CE)'),
-          el('div', { class: `mono ${latest.volDiff >= 0 ? 'bull' : 'bear'}`, style: { fontWeight: '700', fontSize: '16px' } }, (latest.volDiff >= 0 ? '+' : '') + fmtCompact(latest.volDiff)),
+          el('div', { class: `mono ${latest.volDiff < 0 ? 'bull' : 'bear'}`, style: { fontWeight: '700', fontSize: '16px' } }, (latest.volDiff >= 0 ? '+' : '') + fmtCompact(latest.volDiff)),
         ),
         el('div', { class: 'card', style: { padding: '12px 16px', flex: '1', minWidth: '120px' } },
           el('span', { class: 'text-xs muted' }, 'Ticks'),
@@ -837,7 +852,11 @@ export async function mount(container) {
         { key: 'peVol', label: 'PE Vol', render: r => el('td', { class: 'mono' }, fmtCompact(r.peVol)) },
         { key: 'ceCum', label: 'CE Vol Cum', render: r => el('td', { class: 'mono' }, fmtCompact(r.ceCum)) },
         { key: 'peCum', label: 'PE Vol Cum', render: r => el('td', { class: 'mono' }, fmtCompact(r.peCum)) },
-        { key: 'volDiff', label: 'Vol Diff (PE−CE)', render: r => el('td', { class: `mono ${r.volDiff >= 0 ? 'bull' : 'bear'}`, style: { fontWeight: '600' } }, (r.volDiff >= 0 ? '+' : '') + fmtCompact(r.volDiff)) },
+        { key: 'volDiff', label: 'Vol Diff (PE−CE)', render: r => el('td', { class: `mono ${r.volDiff < 0 ? 'bull' : 'bear'}`, style: { fontWeight: '600' } }, (r.volDiff >= 0 ? '+' : '') + fmtCompact(r.volDiff)) },
+        { key: 'volPcr', label: 'Volume PCR', render: r => {
+          if (r.volPcr == null) return el('td', { class: 'mono dim' }, '—');
+          return el('td', { class: `mono ${r.volPcr > 1 ? 'bear' : 'bull'}`, style: { fontWeight: '600' } }, fmtNum(r.volPcr, 2));
+        } },
         { key: 'spot', label: 'Spot Price', render: r => {
           if (r.spot == null) return el('td', { class: 'mono dim' }, '—');
           return el('td', { class: 'mono' }, fmtNum(r.spot, 2));
@@ -863,7 +882,7 @@ export async function mount(container) {
         },
         { key: 'crossover', label: 'Vol Crossover', render: r => {
           if (!r.crossover) return el('td', { class: 'mono dim' }, '—');
-          const tone = r.crossover === 'PE Cross Up' ? 'bull' : 'bear';
+          const tone = r.crossover === 'BUY CE' ? 'bull' : 'bear';
           return el('td', {}, el('span', { class: `change-pill ${tone}`, style: { fontSize: '10px', fontWeight: '700' } }, r.crossover));
         },
           sortFilter: (rs, dir) => rs
@@ -1331,7 +1350,7 @@ export async function mount(container) {
           }
         }
       }
-      const headers = ['Timestamp', 'CE_OI_Change', 'PE_OI_Change', 'CE_Cumulative', 'PE_Cumulative', 'Difference_PE_minus_CE', 'Signal', 'Crossover'];
+      const headers = ['Timestamp', 'CE_OI_Change', 'PE_OI_Change', 'CE_Cumulative', 'PE_Cumulative', 'Difference_PE_minus_CE', 'OI_PCR', 'Signal', 'Crossover'];
       const csvRows = [headers.join(',')];
       for (const r of ticks) {
         const ceCumm = r.ce_oi_cumm_change ?? r.ce_cumulative ?? r.ce_oi_cumm ?? 0;
@@ -1344,6 +1363,7 @@ export async function mount(container) {
           ceCumm,
           peCumm,
           peCumm - ceCumm,
+          ceCumm !== 0 ? (peCumm / ceCumm).toFixed(2) : '',
           (r.signal || '').toUpperCase() || '',
           crossover,
         ].join(','));
@@ -1440,6 +1460,7 @@ export async function mount(container) {
           ceCumm,
           peCumm,
           diff: peCumm - ceCumm,
+          oiPcr: ceCumm !== 0 ? peCumm / ceCumm : null,   // OI PCR = cum ΔPE OI / cum ΔCE OI
           signal,
           signalRank: signal === 'BUY' ? 1 : signal === 'SELL' ? -1 : 0,
           crossover: crossover ? 1 : 0,
@@ -1453,6 +1474,10 @@ export async function mount(container) {
         { key: 'ceCumm', label: 'CE Cumulative', render: r => el('td', { class: `mono ${r.ceCumm >= 0 ? 'bull' : 'bear'}` }, fmtCompact(r.ceCumm)) },
         { key: 'peCumm', label: 'PE Cumulative', render: r => el('td', { class: `mono ${r.peCumm >= 0 ? 'bull' : 'bear'}` }, fmtCompact(r.peCumm)) },
         { key: 'diff', label: 'Difference (PE−CE)', render: r => el('td', { class: `mono ${r.diff >= 0 ? 'bull' : 'bear'}`, style: { fontWeight: '600' } }, (r.diff >= 0 ? '+' : '') + fmtCompact(r.diff)) },
+        { key: 'oiPcr', label: 'OI PCR', render: r => {
+          if (r.oiPcr == null) return el('td', { class: 'mono dim' }, '—');
+          return el('td', { class: `mono ${r.oiPcr >= 1 ? 'bull' : 'bear'}`, style: { fontWeight: '600' } }, fmtNum(r.oiPcr, 2));
+        } },
         { key: 'signalRank', label: 'Signal',
           render: r => {
             const tone = r.signal === 'BUY' ? 'bull' : r.signal === 'SELL' ? 'bear' : 'neutral';
@@ -1527,11 +1552,12 @@ export async function mount(container) {
       }));
     const vMetrics = vData ? _computeVolumeMetrics(vData.summaryRows, vData.oiDiffByTs) : [];
     const volEvents = vMetrics
-      .filter(m => m.crossover)
+      .filter(m => m.volCross)
       .map(m => ({
         timestamp: m.timestamp,
         source: 'Volume',
-        signal: m.crossover === 'PE Cross Up' ? 'BUY' : 'SELL',
+        // spec direction: VOL DIFF(PE-CE) -ve -> BUY (CE); +ve -> SELL (PE)
+        signal: m.volCross,
         metricLabel: 'Vol Diff',
         metricValue: m.volDiff,
       }));

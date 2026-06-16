@@ -185,43 +185,48 @@ def _volume_signal(
     date: str,
     after_iso: str | None = None,
 ) -> dict[str, Any] | None:
-    """Latest volume crossover — matches the Volume Logs tab exactly.
+    """Latest volume signal — matches the Volume Logs tab exactly.
 
-    get_total_volume_series returns the cross-strike day-cumulative CE/PE
-    volume at each 15s fetch (total_ce_volume = CEcum(t), monotonic). The
-    crossover is the sign flip of the single cumulative difference:
-        vol_diff(t) = PEcum(t) - CEcum(t)
-        flip to >= 0  ->  PE volume overtakes CE  -> bullish -> BUY (enter CE)
-        flip to <= 0  ->  CE volume overtakes PE  -> bearish -> SELL (enter PE)
-    This is sampling-independent (same at 15s or 1min) and identical to the
-    Volume Logs "Vol Diff (PE-CE)" crossover column. Returns the latest flip
-    (optionally restricted to after after_iso).
+    Volume is the ATM ± 5-OTM band (dynamic ATM):
+        CE = ATM .. ATM+5 call vol,  PE = ATM-5 .. ATM put vol
+        VOL DIFF(t) = PE(t) - CE(t)
+    Direction (per spec):
+        VOL DIFF -ve  (CE volume heavier) -> BUY  -> enter CE
+        VOL DIFF +ve  (PE volume heavier) -> SELL -> enter PE
+    Transition-based: a signal is emitted on the FIRST directional reading
+    (the 09:15:05 seed entry) and again only when the sign FLIPS — never on
+    every tick. So a position is not re-opened merely because the condition
+    stays true (e.g. after a manual exit). Returns the latest transition,
+    optionally restricted to after after_iso.
     """
     series = data_processor.get_total_volume_series(instrument, date)
-    prev_diff: float | None = None
-    last_flip: dict[str, Any] | None = None
+    prev_state: str | None = None
+    last_sig: dict[str, Any] | None = None
     for row in series:
-        ce_cum = utils.safe_float(row.get("total_ce_volume"), 0.0) or 0.0
-        pe_cum = utils.safe_float(row.get("total_pe_volume"), 0.0) or 0.0
-        vol_diff = pe_cum - ce_cum
-        if prev_diff is not None:
-            if prev_diff < 0 <= vol_diff:
-                last_flip = {"timestamp": row["timestamp"], "signal": "BUY",
-                             "vol_difference": vol_diff}
-            elif prev_diff > 0 >= vol_diff:
-                last_flip = {"timestamp": row["timestamp"], "signal": "SELL",
-                             "vol_difference": vol_diff}
-        prev_diff = vol_diff
-    if last_flip is None:
+        ce = utils.safe_float(row.get("atm_ce_volume"), 0.0) or 0.0
+        pe = utils.safe_float(row.get("atm_pe_volume"), 0.0) or 0.0
+        vol_diff = pe - ce
+        if vol_diff < 0:
+            state = "BUY"      # CE volume heavier -> enter CE
+        elif vol_diff > 0:
+            state = "SELL"     # PE volume heavier -> enter PE
+        else:
+            state = None
+        # Emit on the first directional reading (09:15:05 seed) and on each flip
+        if state is not None and state != prev_state:
+            last_sig = {"timestamp": row["timestamp"], "signal": state,
+                        "vol_difference": vol_diff}
+            prev_state = state
+    if last_sig is None:
         return None
-    if after_iso and str(last_flip["timestamp"]) <= str(after_iso):
+    if after_iso and str(last_sig["timestamp"]) <= str(after_iso):
         return None
     # Normalise to the OI-signal shape so downstream ctx handling is uniform
-    last_flip.setdefault("oi_difference", None)
-    last_flip.setdefault("pcr", None)
-    last_flip.setdefault("ce_oi_cumm_change", None)
-    last_flip.setdefault("pe_oi_cumm_change", None)
-    return last_flip
+    last_sig.setdefault("oi_difference", None)
+    last_sig.setdefault("pcr", None)
+    last_sig.setdefault("ce_oi_cumm_change", None)
+    last_sig.setdefault("pe_oi_cumm_change", None)
+    return last_sig
 
 
 def _vwap_signal(
@@ -244,10 +249,12 @@ def _vwap_signal(
         spot < VWAP − 0.05%  →  SELL  (enter PE)
         else                 →  NEUTRAL (no signal)
 
-    Returns the most recent BUY or SELL state (not a flip — the current
-    directional position), optionally restricted to signals after after_iso.
-    This mirrors how the trade engine reads OI: "what is the current signal
-    direction?" rather than "when did it last flip?".
+    Returns the latest fresh CROSSOVER (a directional state change), NOT the
+    continuous state — entry fires only when spot freshly crosses the band, and
+    is not re-opened merely because spot stays beyond the band (e.g. right after
+    a manual exit). A dip back inside the band does not reset the side; only a
+    flip to the opposite side is a new crossover. Optionally restricted to
+    signals after after_iso.
     """
     BAND_PCT = 0.0005    # 0.05% band around VWAP
 
@@ -260,6 +267,7 @@ def _vwap_signal(
     prev_ce_cum: float | None = None
     prev_pe_cum: float | None = None
     last_signal: dict[str, Any] | None = None
+    prev_dir: str | None = None   # last DIRECTIONAL side (BUY/SELL), for crossover detection
 
     for row in series:
         ts = row.get("timestamp") or ""
@@ -293,21 +301,25 @@ def _vwap_signal(
         elif spot < vwap - band:
             sig = "SELL"
         else:
-            continue  # NEUTRAL — no active directional position
+            continue  # NEUTRAL (inside band) — keep prev_dir; not a fresh cross
 
-        candidate = {
-            "timestamp": ts,
-            "signal": sig,
-            "vwap": vwap,
-            "spot": spot,
-            "band": band,
-            "oi_difference": None,
-            "pcr": None,
-            "ce_oi_cumm_change": None,
-            "pe_oi_cumm_change": None,
-        }
-        # Keep updating: we want the MOST RECENT directional state
-        last_signal = candidate
+        # Emit only on a FRESH crossover (directional state change) — including
+        # the first directional reading of the day. While the side is unchanged
+        # we keep the original transition so the engine won't re-enter on a
+        # condition that merely stays true.
+        if sig != prev_dir:
+            last_signal = {
+                "timestamp": ts,
+                "signal": sig,
+                "vwap": vwap,
+                "spot": spot,
+                "band": band,
+                "oi_difference": None,
+                "pcr": None,
+                "ce_oi_cumm_change": None,
+                "pe_oi_cumm_change": None,
+            }
+            prev_dir = sig
 
     if last_signal is None:
         return None

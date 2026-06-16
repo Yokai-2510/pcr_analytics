@@ -804,13 +804,26 @@ def get_total_volume_series(instrument: str, date: str) -> list[dict[str, Any]]:
     # pre-open prev_close baseline fetch (~00:00) whose cumulative volume would
     # otherwise pollute the first row — the frontend strips it too, but doing
     # it here keeps the trade engine's volume crossover identical to the tab.
+    # ATM ± 5-OTM band, dynamic per fetch (atm_strike is stored per row):
+    #   CE  = ATM .. ATM+5  (OTM calls)   -> strike in [atm, atm + 5*step]
+    #   PE  = ATM-5 .. ATM  (OTM puts)    -> strike in [atm - 5*step, atm]
+    # total_* keep ALL strikes (used by VWAP); atm_* are the scanner volumes
+    # (CE/PE Vol columns, VOL DIFF, Volume PCR, and the volume crossover signal).
+    band = 5 * _strike_step(instrument)
     result = _query(
         """
         SELECT
             timestamp,
             SUM(COALESCE(ce_volume, 0)) AS total_ce_volume,
             SUM(COALESCE(pe_volume, 0)) AS total_pe_volume,
-            AVG(underlying_spot_price) AS underlying_spot_price
+            SUM(CASE WHEN atm_strike IS NOT NULL
+                      AND strike >= atm_strike AND strike <= atm_strike + ?
+                     THEN COALESCE(ce_volume, 0) ELSE 0 END) AS atm_ce_volume,
+            SUM(CASE WHEN atm_strike IS NOT NULL
+                      AND strike <= atm_strike AND strike >= atm_strike - ?
+                     THEN COALESCE(pe_volume, 0) ELSE 0 END) AS atm_pe_volume,
+            AVG(underlying_spot_price) AS underlying_spot_price,
+            MAX(atm_strike) AS atm_strike
         FROM oi_snapshots
         WHERE instrument = ? AND timestamp >= ? AND timestamp < ?
           AND substr(timestamp, 12, 5) >= '09:15'
@@ -818,7 +831,7 @@ def get_total_volume_series(instrument: str, date: str) -> list[dict[str, Any]]:
         GROUP BY timestamp
         ORDER BY timestamp
         """,
-        (instrument, *_date_bounds(date)),
+        (band, band, instrument, *_date_bounds(date)),
     )
     _VOL_SERIES_CACHE[ck] = (now, result)
     return result

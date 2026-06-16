@@ -363,6 +363,30 @@ export function ChipMultiPicker({ options = [], value = [], onChange } = {}) {
   };
 }
 
+// ---- RadioGroup — single-select radio buttons (only one value at a time) ----
+export function RadioGroup({ name = 'radio', options = [], value = null, onChange } = {}) {
+  let selected = value;
+  const wrap = el('div', { class: 'radio-group', role: 'radiogroup' });
+  const inputs = [];
+  options.forEach(opt => {
+    const input = el('input', { type: 'radio', name, value: String(opt.value) });
+    if (selected === opt.value) input.checked = true;
+    input.addEventListener('change', () => {
+      if (input.checked) {
+        selected = opt.value;
+        if (typeof onChange === 'function') onChange(selected);
+      }
+    });
+    inputs.push(input);
+    wrap.appendChild(el('label', { class: 'radio-option' }, input, el('span', {}, opt.label)));
+  });
+  return {
+    el: wrap,
+    get: () => selected,
+    set: (v) => { selected = v; inputs.forEach(i => { i.checked = (i.value === String(v)); }); },
+  };
+}
+
 // ---- FormField — vertical layout: [label + right control] / [input] / [hint] ----
 // label: string (required). input: any DOM node. hint: optional string.
 // rightControl: optional DOM node rendered on the label row (e.g. a toggle).

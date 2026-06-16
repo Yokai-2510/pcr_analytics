@@ -1,7 +1,7 @@
 // pages/trade.js — paper trading: Configs, Orders, Reports
 // Config and orders live in the backend (/api/trade/*). LocalStorage is a
 // fallback when the API is unreachable so the UI never goes blank.
-import { el, toast, Select, Toggle, ChipMultiPicker, FormField } from '../components.js';
+import { el, toast, Select, Toggle, ChipMultiPicker, RadioGroup, FormField } from '../components.js';
 import { api } from '../api.js';
 
 const STORAGE_KEY = 'trade_config_v1';
@@ -99,6 +99,11 @@ function _stopPoll() {
 
 async function renderConfigs(root) {
   const loaded = await loadConfig();
+  // Single instrument only — collapse any legacy multi-instrument config to the
+  // first so the radio + engine operate on exactly one underlying.
+  if (Array.isArray(loaded.instruments) && loaded.instruments.length > 1) {
+    loaded.instruments = [loaded.instruments[0]];
+  }
 
   // Track whether the config differs from the last-saved version so the
   // Save button stays greyed until the user actually changes something.
@@ -280,15 +285,19 @@ function renderEntrySection(cfg) {
 }
 
 function renderInstrumentSection(cfg) {
-  const instPicker = ChipMultiPicker({
+  // Single instrument only (radio) — one option-chain at a time avoids
+  // live-trading config/mapping errors. Stored as a 1-element list so the
+  // engine's `instruments` loop is unchanged.
+  const instPicker = RadioGroup({
+    name: 'trade-instrument',
     options: [
       { value: 'nifty', label: 'NIFTY' },
       { value: 'banknifty', label: 'BankNIFTY' },
       { value: 'sensex', label: 'Sensex' },
     ],
-    value: cfg.instruments,
+    value: (cfg.instruments && cfg.instruments[0]) || 'nifty',
     onChange: (v) => {
-      cfg.instruments = v;
+      cfg.instruments = [v];
       lotInfo.textContent = formatLotInfo(cfg);
     },
   });
@@ -337,9 +346,9 @@ function renderInstrumentSection(cfg) {
 
   return section('Instrument & Quantity', [
     FormField({
-      label: 'Underlyings',
+      label: 'Instrument',
       input: instPicker.el,
-      hint: 'Pick one or more. Each enabled underlying gets its own entries when its sentiment matches.',
+      hint: 'One instrument at a time — guarantees the correct option-chain mapping and avoids live-trading config errors.',
     }),
     FormField({
       label: 'Strike selection',
