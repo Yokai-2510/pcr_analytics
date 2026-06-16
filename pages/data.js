@@ -664,8 +664,8 @@ export async function mount(container) {
 
     for (let i = 0; i < summaryRows.length; i++) {
       const r = summaryRows[i];
-      const ceCum = r.atm_ce_volume || 0;    // ATM±5 band cumulative CE volume
-      const peCum = r.atm_pe_volume || 0;    // ATM±5 band cumulative PE volume
+      const ceCum = r.atm_ce_volume || 0;    // 1 ITM+ATM+5 OTM band cumulative CE volume
+      const peCum = r.atm_pe_volume || 0;    // 1 ITM+ATM+5 OTM band cumulative PE volume
       const totCe = r.total_ce_volume || 0;  // all-strikes (VWAP only)
       const totPe = r.total_pe_volume || 0;
       const spot  = r.underlying_spot_price || 0;
