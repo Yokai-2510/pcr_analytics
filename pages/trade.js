@@ -1,6 +1,8 @@
-// pages/trade.js — paper trading: Configs, Orders, Reports
-// Config and orders live in the backend (/api/trade/*). LocalStorage is a
-// fallback when the API is unreachable so the UI never goes blank.
+  // pages/trade.js — paper trading: Configs, Orders, Reports
+  // Config and orders live in the backend (/api/trade/*). LocalStorage is a
+  // fallback when the API is unreachable so the UI never goes blank.
+
+
 import { el, toast, Select, Toggle, ChipMultiPicker, FormField } from '../components.js';
 import { api } from '../api.js';
 
@@ -596,8 +598,8 @@ function paintSummary(card, summary, cfg, tab) {
 function paintPositions(card, positions, tab) {
   card.innerHTML = '';
   const cols = tab === 'open'
-    ? ['Time', 'Instrument', 'Strike', 'Type', 'Qty', 'Entry ₹', 'LTP ₹', 'P&L', 'SL', 'Target', '']
-    : ['Entered', 'Exited', 'Instrument', 'Strike', 'Type', 'Qty', 'Entry ₹', 'Exit ₹', 'P&L', 'Reason'];
+    ? ['Time', 'Instrument', 'Strike', 'Type', 'Qty', 'Entry ₹', 'LTP ₹', 'P&L', 'Max ₹', 'SL', 'Target', '']
+    : ['Entered', 'Exited', 'Instrument', 'Strike', 'Type', 'Qty', 'Entry ₹', 'Exit ₹', 'P&L', 'Max ₹', 'Reason'];
 
   const table = el('table', { class: 'data-table', style: { width: '100%' } });
   table.appendChild(el('thead', {},
@@ -635,6 +637,13 @@ function _srcLabel(s) {
   return ({ oi: 'OI', volume: 'VOL', vwap: 'VWAP', ltp: 'LTP' })[s || 'oi'] || String(s).toUpperCase();
 }
 
+// Highest profit reached = (peak LTP since entry − entry) × qty. The engine
+// tracks high_watermark (peak LTP) every tick.
+function _maxProfit(p) {
+  if (p.high_watermark == null || p.entry_price == null) return null;
+  return (Number(p.high_watermark) - Number(p.entry_price)) * (p.qty || 0);
+}
+
 function openRow(p) {
   const ltp = p.live_ltp;
   const pnl = p.unrealized_pnl;
@@ -647,6 +656,7 @@ function openRow(p) {
     cell(fmtRupee(p.entry_price)),
     cell(ltp != null ? fmtRupee(ltp) : '—'),
     cell(pnl != null ? fmtPnL(pnl) : '—', pnl != null ? (pnl >= 0 ? 'bull' : 'bear') : ''),
+    (() => { const mp = _maxProfit(p); return cell(mp != null ? fmtPnL(mp) : '—', mp != null && mp > 0 ? 'bull' : ''); })(),
     cell(p.sl_price != null ? fmtRupee(p.sl_price) : '—'),
     cell(p.target_price != null ? fmtRupee(p.target_price) : '—'),
     el('td', { style: { padding: '6px 10px', textAlign: 'right' } },
@@ -677,6 +687,7 @@ function closedRow(p) {
     cell(fmtRupee(p.entry_price)),
     cell(fmtRupee(p.exit_price)),
     cell(fmtPnL(p.pnl), p.pnl != null && p.pnl >= 0 ? 'bull' : 'bear'),
+    (() => { const mp = _maxProfit(p); return cell(mp != null ? fmtPnL(mp) : '—', mp != null && mp > 0 ? 'bull' : ''); })(),
     cell(formatExitReason(p.exit_reason)),
   );
 }

@@ -399,6 +399,17 @@ def update_position_tsl(position_id: int, high_watermark: float, sl_price: float
         conn.commit()
 
 
+def update_position_high_watermark(position_id: int, high_watermark: float) -> None:
+    """Track the peak LTP since entry (= highest profit reached), independent of
+    the trailing-SL config."""
+    with closing(data_processor.connect()) as conn:
+        conn.execute(
+            "UPDATE positions SET high_watermark = ? WHERE id = ? AND status = 'open'",
+            (high_watermark, position_id),
+        )
+        conn.commit()
+
+
 def request_manual_exit(position_id: int) -> bool:
     """Flag a position for manual exit on the engine's next tick.
     Returns True if a still-open position was flagged."""

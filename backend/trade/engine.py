@@ -100,6 +100,13 @@ def _evaluate_one_exit(
         # Normal pre-market / data-gap — skip the non-forced exit checks.
         return
 
+    # Track the peak LTP since entry (= highest profit reached) every tick,
+    # independent of the trailing-SL config — drives the Max Profit column.
+    hwm = position.get("high_watermark")
+    if hwm is None or ltp > float(hwm):
+        persistence.update_position_high_watermark(int(position["id"]), ltp)
+        position["high_watermark"] = ltp
+
     # Priority 2: configured time-based exit
     if config.get("time_exit_enabled") and config.get("time_exit_at"):
         time_exit = _parse_hhmm(str(config["time_exit_at"]))
