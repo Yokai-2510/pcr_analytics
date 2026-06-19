@@ -430,6 +430,24 @@ function renderExitSection(cfg) {
     disabled: !cfg.target_enabled,
   });
 
+  const peakToggle = Toggle({
+    value: cfg.peak_trail_enabled,
+    onChange: (on) => {
+      cfg.peak_trail_enabled = on;
+      peakInput.disabled = !on;
+      peakField.classList.toggle('disabled', !on);
+    },
+  });
+  const peakInput = el('input', { type: 'number', min: '1', max: '99', step: '1', value: String(cfg.peak_trail_pct ?? 80) });
+  peakInput.disabled = !cfg.peak_trail_enabled;
+  peakInput.onchange = () => { cfg.peak_trail_pct = parseFloat(peakInput.value) || 80; };
+  const peakField = FormField({
+    label: 'Peak trailing exit', rightControl: peakToggle.el,
+    input: [peakInput, el('span', { class: 'unit' }, '% of peak premium to hold')],
+    hint: 'Once in profit, books the position if premium falls below this % of its highest point (e.g. 80% = give back at most ~20% of the peak). A peak-based trailing stop.',
+    disabled: !cfg.peak_trail_enabled,
+  });
+
   const timeToggle = Toggle({
     value: cfg.time_exit_enabled,
     onChange: (on) => {
@@ -472,7 +490,7 @@ function renderExitSection(cfg) {
       input: el('div', { class: 'form-field-hint', style: { color: 'var(--text)' } },
         'Closes a CE position when a SELL crossover fires (and vice-versa) — the primary exit rule for this strategy.'),
     }),
-    slField, tslField, tgtField, timeField,
+    slField, tslField, tgtField, peakField, timeField,
     FormField({
       label: 'No new entries after',
       input: [noEntryInput, el('span', { class: 'unit' }, 'IST')],

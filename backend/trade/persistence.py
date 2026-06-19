@@ -189,6 +189,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "trailing_sl_step_pct": 10,
     "target_enabled": True,
     "target_pct": 50,
+    "peak_trail_enabled": False,
+    "peak_trail_pct": 80,   # once in profit, exit if premium falls below this % of its peak
     "time_exit_enabled": True,
     "time_exit_at": "15:15",
     "no_entry_after": "15:25",   # stop opening NEW positions this late (intraday

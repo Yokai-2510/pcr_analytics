@@ -102,10 +102,20 @@ def _evaluate_one_exit(
 
     # Track the peak LTP since entry (= highest profit reached) every tick,
     # independent of the trailing-SL config — drives the Max Profit column.
-    hwm = position.get("high_watermark")
-    if hwm is None or ltp > float(hwm):
+    prev_hwm = position.get("high_watermark")
+    hwm = ltp if (prev_hwm is None or ltp > float(prev_hwm)) else float(prev_hwm)
+    if prev_hwm is None or ltp > float(prev_hwm):
         persistence.update_position_high_watermark(int(position["id"]), ltp)
         position["high_watermark"] = ltp
+
+    # Priority 1b: peak trailing exit. Once in profit (peak above entry), exit if
+    # the premium retraces below peak_trail_pct% of its peak — books profit before
+    # a reversal extends. e.g. 80% => give back at most ~20% of the peak.
+    if config.get("peak_trail_enabled") and hwm > entry_price:
+        pct = float(config.get("peak_trail_pct") or 0)
+        if pct > 0 and ltp <= hwm * (pct / 100.0):
+            _close(position, "exit_trail", ltp, b)
+            return
 
     # Priority 2: configured time-based exit
     if config.get("time_exit_enabled") and config.get("time_exit_at"):
@@ -340,105 +350,23 @@ def _ltp_signal(
     date: str,
     after_iso: str | None = None,
 ) -> dict[str, Any] | None:
-    """Latest LTP-Based Option Strength signal (Dr. Vijay's spec STEP 12/13).
+    """LTP-Based Option Strength signal (Dr. Vijay's spec STEP 12/13).
 
-    Computes only the latest tick's strict signal (not the whole-day series)
-    so the per-second engine stays fast:
+    Strict signal per tick:
         BUY (→CE)  iff CE_SUM>0 & PE_SUM<0 & DirStrength>0 & Rolling>0 & spot>VWAP
         SELL (→PE) iff CE_SUM<0 & PE_SUM>0 & DirStrength<0 & Rolling<0 & spot<VWAP
-    Otherwise None (market-state quadrant, no actionable trade).
+        else None.
+
+    TRANSITION-BASED: returns the signal only when it *changes* vs the previous
+    tick — so a position is not re-opened while the signal merely stays in the
+    same BUY/SELL state (the cause of LTP re-entering right after a TSL/target
+    exit). Computes only the latest two ticks, so the per-second engine stays
+    fast.
     """
     step = data_processor._strike_step(instrument)
-    with closing(data_processor.connect()) as conn:
-        latest = conn.execute(
-            "SELECT MAX(timestamp) AS ts FROM oi_snapshots "
-            "WHERE instrument=? AND substr(timestamp,1,10)=? "
-            "AND substr(timestamp,12,5)>='09:15' AND substr(timestamp,12,5)<='15:30'",
-            (instrument, date),
-        ).fetchone()
-        ts = latest["ts"] if latest else None
-        if not ts:
-            return None
-        head = conn.execute(
-            "SELECT atm_strike, underlying_spot_price FROM oi_snapshots "
-            "WHERE instrument=? AND timestamp=? LIMIT 1",
-            (instrument, ts),
-        ).fetchone()
-        if not head or head["atm_strike"] is None:
-            return None
-        atm = float(head["atm_strike"])
-        spot = utils.safe_float(head["underlying_spot_price"], 0.0) or 0.0
 
-        ce_strikes = [atm - k * step for k in range(4)]   # ATM + 3 ITM (lower)
-        pe_strikes = [atm + k * step for k in range(4)]   # ATM + 3 ITM (higher)
-        strikes = sorted(set(ce_strikes + pe_strikes))
-        ph = ",".join("?" for _ in strikes)
-
-        def fetch_at(stamp: str) -> dict[float, Any]:
-            if not stamp:
-                return {}
-            return {
-                r["strike"]: r
-                for r in conn.execute(
-                    f"SELECT strike, ce_ltp, pe_ltp FROM oi_snapshots "
-                    f"WHERE instrument=? AND timestamp=? AND strike IN ({ph})",
-                    (instrument, stamp, *strikes),
-                ).fetchall()
-            }
-
-        cur = fetch_at(ts)
-        first_ts = conn.execute(
-            "SELECT MIN(timestamp) AS ts FROM oi_snapshots "
-            "WHERE instrument=? AND substr(timestamp,1,10)=? AND substr(timestamp,12,5)>='09:15'",
-            (instrument, date),
-        ).fetchone()["ts"]
-        ref = fetch_at(first_ts)
-
-        try:
-            t5 = (datetime.fromisoformat(ts) - timedelta(minutes=5)).strftime("%H:%M:%S")
-        except ValueError:
-            t5 = None
-        ts5 = None
-        if t5:
-            row5 = conn.execute(
-                "SELECT MAX(timestamp) AS ts FROM oi_snapshots "
-                "WHERE instrument=? AND substr(timestamp,1,10)=? AND substr(timestamp,12,8)<=?",
-                (instrument, date, t5),
-            ).fetchone()
-            ts5 = row5["ts"] if row5 else None
-        ago = fetch_at(ts5) if ts5 else {}
-
-    def _ltp(d: dict, strike: float, col: str):
-        r = d.get(strike)
-        return utils.safe_float(r[col], None) if r else None
-
-    def sess(strikes_list, col):
-        tot = 0.0
-        for s in strikes_list:
-            c = _ltp(cur, s, col)
-            rf = _ltp(ref, s, col)
-            if c is not None and rf is not None:
-                tot += c - rf
-        return tot
-
-    def roll(strikes_list, col):
-        if not ago:
-            return 0.0
-        tot = 0.0
-        for s in strikes_list:
-            c = _ltp(cur, s, col)
-            a = _ltp(ago, s, col)
-            if c is not None and a is not None:
-                tot += c - a
-        return tot
-
-    ce_sum = sess(ce_strikes, "ce_ltp")
-    pe_sum = sess(pe_strikes, "pe_ltp")
-    dir_strength = ce_sum - pe_sum
-    rolling_strength = roll(ce_strikes, "ce_ltp") - roll(pe_strikes, "pe_ltp")
-
-    # VWAP at latest (same session-anchored formula as the volume tab).
-    vwap = 0.0
+    # Session VWAP at every tick (one pass over the cached volume series).
+    vwap_by_ts: dict[str, float] = {}
     cum_pv = cum_vol = 0.0
     pce = ppe = None
     for vr in data_processor.get_total_volume_series(instrument, date):
@@ -452,25 +380,122 @@ def _ltp_signal(
         if sp > 0 and tv > 0:
             cum_pv += sp * tv
             cum_vol += tv
-    if cum_vol > 0:
-        vwap = cum_pv / cum_vol
+        vwap_by_ts[vr["timestamp"]] = (cum_pv / cum_vol) if cum_vol > 0 else 0.0
 
-    signal, _state = data_processor._ltp_decide(
-        ce_sum, pe_sum, dir_strength, rolling_strength, spot, vwap
-    )
-    if signal is None:
+    with closing(data_processor.connect()) as conn:
+        latest = conn.execute(
+            "SELECT MAX(timestamp) AS ts FROM oi_snapshots WHERE instrument=? "
+            "AND substr(timestamp,1,10)=? AND substr(timestamp,12,5)>='09:15' "
+            "AND substr(timestamp,12,5)<='15:30'",
+            (instrument, date),
+        ).fetchone()
+        ts = latest["ts"] if latest else None
+        if not ts:
+            return None
+        prev = conn.execute(
+            "SELECT MAX(timestamp) AS ts FROM oi_snapshots WHERE instrument=? "
+            "AND substr(timestamp,1,10)=? AND timestamp < ? AND substr(timestamp,12,5)>='09:15'",
+            (instrument, date, ts),
+        ).fetchone()
+        prev_ts = prev["ts"] if prev and prev["ts"] else None
+        first_ts = conn.execute(
+            "SELECT MIN(timestamp) AS ts FROM oi_snapshots WHERE instrument=? "
+            "AND substr(timestamp,1,10)=? AND substr(timestamp,12,5)>='09:15'",
+            (instrument, date),
+        ).fetchone()["ts"]
+
+        def strict_at(t: str | None):
+            """(signal, metrics) for tick t — strict STEP 12/13 decision."""
+            if not t:
+                return None, None
+            head = conn.execute(
+                "SELECT atm_strike, underlying_spot_price FROM oi_snapshots "
+                "WHERE instrument=? AND timestamp=? LIMIT 1",
+                (instrument, t),
+            ).fetchone()
+            if not head or head["atm_strike"] is None:
+                return None, None
+            atm = float(head["atm_strike"])
+            spot = utils.safe_float(head["underlying_spot_price"], 0.0) or 0.0
+            ce_strikes = [atm - k * step for k in range(4)]   # ATM + 3 ITM (lower)
+            pe_strikes = [atm + k * step for k in range(4)]   # ATM + 3 ITM (higher)
+            strikes = sorted(set(ce_strikes + pe_strikes))
+            ph = ",".join("?" for _ in strikes)
+
+            def fetch(stamp):
+                if not stamp:
+                    return {}
+                return {
+                    r["strike"]: r for r in conn.execute(
+                        f"SELECT strike, ce_ltp, pe_ltp FROM oi_snapshots "
+                        f"WHERE instrument=? AND timestamp=? AND strike IN ({ph})",
+                        (instrument, stamp, *strikes),
+                    ).fetchall()
+                }
+
+            cur = fetch(t)
+            ref = fetch(first_ts)
+            try:
+                t5 = (datetime.fromisoformat(t) - timedelta(minutes=5)).strftime("%H:%M:%S")
+            except ValueError:
+                t5 = None
+            ts5 = None
+            if t5:
+                r5 = conn.execute(
+                    "SELECT MAX(timestamp) AS ts FROM oi_snapshots WHERE instrument=? "
+                    "AND substr(timestamp,1,10)=? AND substr(timestamp,12,8)<=?",
+                    (instrument, date, t5),
+                ).fetchone()
+                ts5 = r5["ts"] if r5 else None
+            ago = fetch(ts5) if ts5 else {}
+
+            def _ltp(d, s, col):
+                r = d.get(s)
+                return utils.safe_float(r[col], None) if r else None
+
+            def sess(sl, col):
+                tot = 0.0
+                for s in sl:
+                    c, rf = _ltp(cur, s, col), _ltp(ref, s, col)
+                    if c is not None and rf is not None:
+                        tot += c - rf
+                return tot
+
+            def roll(sl, col):
+                if not ago:
+                    return 0.0
+                tot = 0.0
+                for s in sl:
+                    c, a = _ltp(cur, s, col), _ltp(ago, s, col)
+                    if c is not None and a is not None:
+                        tot += c - a
+                return tot
+
+            ce_sum = sess(ce_strikes, "ce_ltp")
+            pe_sum = sess(pe_strikes, "pe_ltp")
+            dir_s = ce_sum - pe_sum
+            roll_s = roll(ce_strikes, "ce_ltp") - roll(pe_strikes, "pe_ltp")
+            vwap = vwap_by_ts.get(t, 0.0)
+            sig, _ = data_processor._ltp_decide(ce_sum, pe_sum, dir_s, roll_s, spot, vwap)
+            return sig, {
+                "ce_sum": ce_sum, "pe_sum": pe_sum,
+                "directional_strength": dir_s, "rolling_strength": roll_s,
+                "vwap": vwap, "spot": spot,
+            }
+
+        sig_now, metrics = strict_at(ts)
+        sig_prev, _ = strict_at(prev_ts)
+
+    if sig_now not in ("BUY", "SELL"):
         return None
+    if sig_now == sig_prev:
+        return None   # signal held — not a fresh crossover, don't re-enter
     if after_iso and str(ts) <= str(after_iso):
         return None
     return {
         "timestamp": ts,
-        "signal": signal,
-        "ce_sum": ce_sum,
-        "pe_sum": pe_sum,
-        "directional_strength": dir_strength,
-        "rolling_strength": rolling_strength,
-        "vwap": vwap,
-        "spot": spot,
+        "signal": sig_now,
+        **(metrics or {}),
         "oi_difference": None,
         "pcr": None,
         "ce_oi_cumm_change": None,
