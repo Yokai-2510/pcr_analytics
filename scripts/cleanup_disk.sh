@@ -20,8 +20,8 @@ set -uo pipefail
 
 BASE="${PCR_BASE:-/home/ubuntu/index_pcr}"
 DB="$BASE/data/oi_data.db"
-CSV_KEEP_DAYS="${CSV_KEEP_DAYS:-2}"
-DB_KEEP_DAYS="${DB_KEEP_DAYS:-7}"
+CSV_KEEP_DAYS="${CSV_KEEP_DAYS:-1}"
+DB_KEEP_DAYS="${DB_KEEP_DAYS:-4}"
 ts() { date '+%F %T'; }
 
 echo "[$(ts)] cleanup start (csv_keep=${CSV_KEEP_DAYS}d db_keep=${DB_KEEP_DAYS}d)"
@@ -38,6 +38,19 @@ for ins in nifty banknifty sensex; do
 done
 after=$(sqlite3 "$DB" "SELECT COUNT(*) FROM oi_snapshots;" 2>/dev/null || echo '?')
 echo "[$(ts)] oi_snapshots pruned (< ${CUTOFF}): ${before} -> ${after} rows"
+
+# 3) VACUUM to reclaim the file slack (DELETE alone never shrinks the .db).
+# Guarded: VACUUM builds a full copy, so only run when free space exceeds the
+# current DB size — otherwise it would itself fill the disk. Skips silently when
+# the disk is too tight (the usual case until CSV logging is reduced/disk grown).
+db_bytes=$(stat -c %s "$DB" 2>/dev/null || echo 0)
+avail_bytes=$(( $(df -k --output=avail / | tail -1) * 1024 ))
+if [ "$avail_bytes" -gt "$(( db_bytes + 524288000 ))" ]; then
+  sqlite3 "$DB" "PRAGMA busy_timeout=120000; VACUUM;" >/dev/null 2>&1 && \
+    echo "[$(ts)] VACUUM ok ($(stat -c %s "$DB") bytes)" || echo "[$(ts)] VACUUM failed"
+else
+  echo "[$(ts)] VACUUM skipped (need >$(( (db_bytes+524288000)/1048576 ))M free, have $(( avail_bytes/1048576 ))M)"
+fi
 
 df -h / | awk -v t="$(ts)" 'NR==2{print "["t"] disk: "$5" used, "$4" free"}'
 echo "[$(ts)] cleanup done"
