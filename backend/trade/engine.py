@@ -357,11 +357,13 @@ def _ltp_signal(
         SELL (→PE) iff CE_SUM<0 & PE_SUM>0 & DirStrength<0 & Rolling<0 & spot<VWAP
         else None.
 
-    TRANSITION-BASED: returns the signal only when it *changes* vs the previous
-    tick — so a position is not re-opened while the signal merely stays in the
-    same BUY/SELL state (the cause of LTP re-entering right after a TSL/target
-    exit). Computes only the latest two ticks, so the per-second engine stays
-    fast.
+    CROSSOVER-BASED (regime flip): returns a signal only when the strict
+    decision flips to the OPPOSITE side of the last regime we actually traded
+    today (tracked via the most recent LTP entry order; CE => BUY, PE => SELL).
+    A neutral (None) reading never resets the regime, so the same side is never
+    re-opened between crossovers — including right after a stop-loss/target/TSL
+    exit, where the engine stays flat until the next crossover. Computes only
+    the latest tick, so the per-second engine stays fast.
     """
     step = data_processor._strike_step(instrument)
 
@@ -392,12 +394,6 @@ def _ltp_signal(
         ts = latest["ts"] if latest else None
         if not ts:
             return None
-        prev = conn.execute(
-            "SELECT MAX(timestamp) AS ts FROM oi_snapshots WHERE instrument=? "
-            "AND substr(timestamp,1,10)=? AND timestamp < ? AND substr(timestamp,12,5)>='09:15'",
-            (instrument, date, ts),
-        ).fetchone()
-        prev_ts = prev["ts"] if prev and prev["ts"] else None
         first_ts = conn.execute(
             "SELECT MIN(timestamp) AS ts FROM oi_snapshots WHERE instrument=? "
             "AND substr(timestamp,1,10)=? AND substr(timestamp,12,5)>='09:15'",
@@ -484,12 +480,21 @@ def _ltp_signal(
             }
 
         sig_now, metrics = strict_at(ts)
-        sig_prev, _ = strict_at(prev_ts)
 
     if sig_now not in ("BUY", "SELL"):
         return None
-    if sig_now == sig_prev:
-        return None   # signal held — not a fresh crossover, don't re-enter
+    # Crossover semantics (Dr. Vijay's spec + trader's intent): the LTP regime
+    # flips ONLY on a genuine BUY<->SELL change relative to the last side we
+    # actually traded today (CE => BUY regime, PE => SELL regime). A neutral
+    # (None) reading never resets the regime, so the SAME side is never
+    # re-entered between crossovers. After an early exit (e.g. stop-loss) we sit
+    # flat and wait for the next crossover before opening a new position — the
+    # crossover is the ultimate exit AND the only entry trigger. The first
+    # directional reading of the day (no prior entry) is itself the seed cross.
+    last_side = persistence.last_entry_side_for_instrument_source(instrument, "ltp", date)
+    last_regime = {"CE": "BUY", "PE": "SELL"}.get(last_side or "")
+    if sig_now == last_regime:
+        return None   # regime held — not a fresh crossover, don't re-enter
     if after_iso and str(ts) <= str(after_iso):
         return None
     return {

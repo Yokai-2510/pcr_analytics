@@ -370,6 +370,29 @@ def last_entry_time_for_instrument_source(instrument: str, source: str, date: st
     return row["ts"] if row and row["ts"] else None
 
 
+def last_entry_side_for_instrument_source(instrument: str, source: str, date: str) -> str | None:
+    """option_type ('CE'/'PE') of the most recent ENTRY order for
+    (instrument, source) today, or None if no entry has been taken yet.
+
+    The LTP engine uses this to define the current *directional regime* it last
+    traded (CE => BUY regime, PE => SELL regime). A new position is only opened
+    when the live signal flips to the OPPOSITE regime (a genuine crossover), so
+    the same side is never re-entered between crossovers — including after an
+    early stop-loss exit, where we wait for the next crossover before re-entering."""
+    with closing(data_processor.connect()) as conn:
+        row = conn.execute(
+            """
+            SELECT option_type FROM orders
+            WHERE instrument = ? AND source = ? AND intent = 'entry'
+              AND substr(placed_at, 1, 10) = ?
+            ORDER BY placed_at DESC
+            LIMIT 1
+            """,
+            (instrument, source, date),
+        ).fetchone()
+    return row["option_type"] if row and row["option_type"] else None
+
+
 def positions_for_date(date: str, status: str | None = None) -> list[dict[str, Any]]:
     where = ["substr(entry_time, 1, 10) = ?"]
     params: list[Any] = [date]
