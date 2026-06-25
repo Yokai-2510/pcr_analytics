@@ -466,11 +466,11 @@ export async function mount(container) {
       const miniSummary2 = el('div', { style: { display: 'flex', gap: '16px', marginBottom: '16px', flexWrap: 'wrap' } },
         el('div', { class: 'card', style: { padding: '12px 16px', flex: '1', minWidth: '120px' } },
           el('span', { class: 'text-xs muted' }, 'CE OI Change'),
-          el('div', { class: `mono ${latestCeChg >= 0 ? 'bull' : 'bear'}`, style: { fontWeight: '700', fontSize: '16px' } }, (latestCeChg >= 0 ? '+' : '') + fmtCompact(latestCeChg)),
+          el('div', { class: 'mono', style: { fontWeight: '700', fontSize: '16px' } }, fmtCompact(Math.abs(latestCeChg))),
         ),
         el('div', { class: 'card', style: { padding: '12px 16px', flex: '1', minWidth: '120px' } },
           el('span', { class: 'text-xs muted' }, 'PE OI Change'),
-          el('div', { class: `mono ${latestPeChg >= 0 ? 'bull' : 'bear'}`, style: { fontWeight: '700', fontSize: '16px' } }, (latestPeChg >= 0 ? '+' : '') + fmtCompact(latestPeChg)),
+          el('div', { class: 'mono', style: { fontWeight: '700', fontSize: '16px' } }, fmtCompact(Math.abs(latestPeChg))),
         ),
         el('div', { class: 'card', style: { padding: '12px 16px', flex: '1', minWidth: '120px' } },
           el('span', { class: 'text-xs muted' }, 'Delta PCR'),
@@ -1537,10 +1537,15 @@ export async function mount(container) {
 
       const cols = [
         { key: 'timestamp', label: 'Timestamp', render: r => el('td', { class: 'mono' }, fmtTimeIST(r.timestamp)) },
-        { key: 'ceChg', label: 'CE OI Change', render: r => el('td', { class: `mono ${r.ceChg >= 0 ? 'bull' : 'bear'}` }, fmtCompact(r.ceChg)) },
-        { key: 'peChg', label: 'PE OI Change', render: r => el('td', { class: `mono ${r.peChg >= 0 ? 'bull' : 'bear'}` }, fmtCompact(r.peChg)) },
-        { key: 'ceCumm', label: 'CE Cumulative', render: r => el('td', { class: `mono ${r.ceCumm >= 0 ? 'bull' : 'bear'}` }, fmtCompact(r.ceCumm)) },
-        { key: 'peCumm', label: 'PE Cumulative', render: r => el('td', { class: `mono ${r.peCumm >= 0 ? 'bull' : 'bear'}` }, fmtCompact(r.peCumm)) },
+        // OI change / cumulative columns are shown as positive magnitudes:
+        // cumulative OI only ever grows, so a "-" here just confused traders.
+        // The signed values are kept in the row objects (used by Difference,
+        // OI PCR, sorting and the signal/crossover logic) — only the rendered
+        // text is absolute.
+        { key: 'ceChg', label: 'CE OI Change', render: r => el('td', { class: 'mono' }, fmtCompact(Math.abs(r.ceChg))) },
+        { key: 'peChg', label: 'PE OI Change', render: r => el('td', { class: 'mono' }, fmtCompact(Math.abs(r.peChg))) },
+        { key: 'ceCumm', label: 'CE Cumulative', render: r => el('td', { class: 'mono' }, fmtCompact(Math.abs(r.ceCumm))) },
+        { key: 'peCumm', label: 'PE Cumulative', render: r => el('td', { class: 'mono' }, fmtCompact(Math.abs(r.peCumm))) },
         { key: 'diff', label: 'Difference (PE−CE)', render: r => el('td', { class: `mono ${r.diff >= 0 ? 'bull' : 'bear'}`, style: { fontWeight: '600' } }, (r.diff >= 0 ? '+' : '') + fmtCompact(r.diff)) },
         { key: 'oiPcr', label: 'OI PCR', render: r => {
           if (r.oiPcr == null) return el('td', { class: 'mono dim' }, '—');
