@@ -225,6 +225,26 @@ def ltp_strength_snapshot(
     return data_processor.get_ltp_strength_snapshot(_instrument_or_404(instrument), date)
 
 
+@app.get("/api/option-volume/{instrument}")
+def api_option_volume(instrument: str, date: str | None = None):
+    """1-minute option-volume table (rank-momentum style) + live totals."""
+    day = date or utils.today_ist()
+    rows = data_processor.get_option_volume_logs(instrument, day)
+    live = None
+    try:
+        import ws_engine
+
+        state = ws_engine.ENGINE.optvol_state(instrument)
+        if state:
+            live = {k: state[k] for k in (
+                "ce_buy", "ce_sell", "ce_delta", "pe_buy", "pe_sell",
+                "pe_delta", "net_delta")}
+            live["transitions"] = state["transitions"][-10:]
+    except Exception:
+        live = None
+    return {"instrument": instrument, "date": day, "rows": rows, "live": live}
+
+
 @app.get("/api/option-chain/{instrument}")
 def option_chain(
     instrument: str,

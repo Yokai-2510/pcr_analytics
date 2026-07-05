@@ -35,6 +35,17 @@ def fetch_option_chains(expiries: dict[str, str]) -> dict[str, dict[str, Any] | 
     raw: dict[str, dict[str, Any] | None] = {}
     for item in prepare_fetch_plan(expiries):
         instrument = str(item["instrument"])
+        # WEBSOCKET FIRST: the live in-memory book (same payload shape).
+        # REST below is only the fallback while the socket isn't live yet.
+        try:
+            import ws_engine
+
+            ws_payload = ws_engine.ENGINE.chain_payload(instrument)
+            if ws_payload and ws_payload.get("strikes"):
+                raw[instrument] = ws_payload
+                continue
+        except Exception:
+            logger.exception("ws chain payload failed for %s; REST fallback", instrument)
         try:
             strikes = broker_api.get_option_chain(
                 str(item["instrument_key"]),

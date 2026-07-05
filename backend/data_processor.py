@@ -183,6 +183,18 @@ def initialize_storage() -> None:
             CREATE INDEX IF NOT EXISTS idx_oi_snapshots_date
                 ON oi_snapshots (instrument, substr(timestamp, 1, 10), timestamp);
 
+            CREATE TABLE IF NOT EXISTS option_volume_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                instrument TEXT NOT NULL,
+                ce_buy REAL, ce_sell REAL, ce_delta REAL,
+                pe_buy REAL, pe_sell REAL, pe_delta REAL,
+                net_delta REAL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_option_volume_logs
+                ON option_volume_logs (instrument, substr(timestamp, 1, 10), timestamp);
+
             CREATE TABLE IF NOT EXISTS daily_baselines (
                 {_create_columns_sql(BASELINE_COLUMNS)},
                 UNIQUE(date, baseline_type, instrument, expiry, strike)
@@ -383,6 +395,19 @@ def write_snapshot(filtered_data: dict[str, dict[str, Any] | None]) -> dict[str,
                 rows,
             )
     return counts
+
+
+def get_option_volume_logs(instrument: str, date: str) -> list[dict[str, Any]]:
+    """1-minute option-volume table rows (rank-momentum style) for a day."""
+    with closing(connect()) as conn:
+        rows = conn.execute(
+            "SELECT timestamp, instrument, ce_buy, ce_sell, ce_delta,"
+            " pe_buy, pe_sell, pe_delta, net_delta FROM option_volume_logs"
+            " WHERE instrument = ? AND substr(timestamp, 1, 10) = ?"
+            " ORDER BY timestamp",
+            (instrument, date),
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def persist_market_data(raw_data: dict[str, dict[str, Any] | None]) -> dict[str, Any]:

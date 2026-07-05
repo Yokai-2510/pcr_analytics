@@ -107,6 +107,7 @@ const tabState = {
   'sr':           { instrument: 'nifty', date: new Date().toISOString().slice(0, 10) },
   'oi-change-logs':   { instrument: 'nifty', date: new Date().toISOString().slice(0, 10) },
   'entry-signals':    { instrument: 'nifty', date: new Date().toISOString().slice(0, 10) },
+  'option-volume':    { instrument: 'nifty', date: new Date().toISOString().slice(0, 10) },
   'all-logs':     { instrument: 'nifty', date: new Date().toISOString().slice(0, 10) },
 };
 
@@ -174,6 +175,7 @@ export async function mount(container) {
     { id: 'sr', label: 'S/R' },
     { id: 'oi-change-logs', label: 'OI Change Logs' },
     { id: 'entry-signals', label: 'Entry Signals' },
+    { id: 'option-volume', label: 'Option Volume' },
   ];
   const tabEls = {};
   tabs.forEach(t => {
@@ -194,6 +196,7 @@ export async function mount(container) {
   const srPanel = el('div', { class: 'tab-panel' });
   const oiChangeLogsPanel = el('div', { class: 'tab-panel' });
   const entrySignalsPanel = el('div', { class: 'tab-panel' });
+  const optionVolumePanel = el('div', { class: 'tab-panel' });
   const allLogsPanel = el('div', { class: 'tab-panel' });
 
   // Only the four kept tabs are mounted. The OI Analytics / OI Logs / All Logs
@@ -204,6 +207,7 @@ export async function mount(container) {
   page.appendChild(srPanel);
   page.appendChild(oiChangeLogsPanel);
   page.appendChild(entrySignalsPanel);
+  page.appendChild(optionVolumePanel);
 
   // ── State ──
   let currentResult = null;
@@ -229,6 +233,7 @@ export async function mount(container) {
         else if (tabId === 'sr') renderSR();
         else if (tabId === 'oi-change-logs') renderOiChangeLogs();
         else if (tabId === 'entry-signals') renderEntrySignals();
+        else if (tabId === 'option-volume') renderOptionVolume();
       },
     });
 
@@ -242,6 +247,7 @@ export async function mount(container) {
         else if (tabId === 'sr') renderSR();
         else if (tabId === 'oi-change-logs') renderOiChangeLogs();
         else if (tabId === 'entry-signals') renderEntrySignals();
+        else if (tabId === 'option-volume') renderOptionVolume();
       },
       placeholder: 'All dates',
       width: '150px',
@@ -268,11 +274,13 @@ export async function mount(container) {
     srPanel.style.display = tabId === 'sr' ? '' : 'none';
     oiChangeLogsPanel.style.display = tabId === 'oi-change-logs' ? '' : 'none';
     entrySignalsPanel.style.display = tabId === 'entry-signals' ? '' : 'none';
+    optionVolumePanel.style.display = tabId === 'option-volume' ? '' : 'none';
     if (tabId === 'volume-logs') renderVolumeLogs();
     else if (tabId === 'ltp-strength') renderLtpStrength();
     else if (tabId === 'sr') renderSR();
     else if (tabId === 'oi-change-logs') renderOiChangeLogs();
     else if (tabId === 'entry-signals') renderEntrySignals();
+    else if (tabId === 'option-volume') renderOptionVolume();
   }
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1588,6 +1596,57 @@ export async function mount(container) {
   }
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // OPTION VOLUME TAB — 1-minute aggressor-classified executed volume
+  // (rank-momentum table: CE/PE Buy, Sell, Delta, Net Delta), live via WS.
+  const optionVolumeContent = el('div');
+  buildTabToolbar(optionVolumePanel, 'option-volume');
+  optionVolumePanel.appendChild(optionVolumeContent);
+
+  function _fmtLakh(v) {
+    if (v == null) return '—';
+    const n = Number(v);
+    const a = Math.abs(n);
+    if (a >= 1e7) return (n / 1e7).toFixed(1) + 'Cr';
+    if (a >= 1e5) return (n / 1e5).toFixed(1) + 'L';
+    return n.toLocaleString('en-IN', { maximumFractionDigits: 0 });
+  }
+
+  async function renderOptionVolume(silent = false) {
+    if (!silent) optionVolumeContent.innerHTML = '<div class="dim" style="padding:24px">Loading option volume…</div>';
+    const ts = tabState['option-volume'];
+    try {
+      const res = await api.optionVolume(ts.instrument, ts.date);
+      const rows = res.rows || [];
+      optionVolumeContent.innerHTML = '';
+      if (res.live) {
+        const l = res.live;
+        optionVolumeContent.appendChild(el('div', { class: 'card', style: { marginBottom: '10px', padding: '10px 14px', display: 'flex', gap: '22px', flexWrap: 'wrap', fontSize: '13px' } },
+          el('span', {}, 'LIVE  '),
+          el('span', { class: l.ce_delta >= 0 ? 'bull' : 'bear' }, `CE Δ ${_fmtLakh(l.ce_delta)}`),
+          el('span', { class: l.pe_delta >= 0 ? 'bull' : 'bear' }, `PE Δ ${_fmtLakh(l.pe_delta)}`),
+          el('span', { class: l.net_delta >= 0 ? 'bull' : 'bear' }, `Net Δ ${_fmtLakh(l.net_delta)} → ${l.net_delta >= 0 ? 'CE side' : 'PE side'}`),
+        ));
+      }
+      if (!rows.length) {
+        optionVolumeContent.appendChild(el('div', { class: 'empty-state' }, 'No option volume logs for this date.'));
+        return;
+      }
+      const cols = [
+        { key: 'timestamp', label: 'Time', render: r => (r.timestamp || '').slice(11, 19) },
+        { key: 'ce_buy', label: 'CE Buy', num: true, render: r => _fmtLakh(r.ce_buy) },
+        { key: 'ce_sell', label: 'CE Sell', num: true, render: r => _fmtLakh(r.ce_sell) },
+        { key: 'ce_delta', label: 'CE Delta', num: true, render: r => el('span', { class: r.ce_delta >= 0 ? 'bull' : 'bear' }, _fmtLakh(r.ce_delta)) },
+        { key: 'pe_buy', label: 'PE Buy', num: true, render: r => _fmtLakh(r.pe_buy) },
+        { key: 'pe_sell', label: 'PE Sell', num: true, render: r => _fmtLakh(r.pe_sell) },
+        { key: 'pe_delta', label: 'PE Delta', num: true, render: r => el('span', { class: r.pe_delta >= 0 ? 'bull' : 'bear' }, _fmtLakh(r.pe_delta)) },
+        { key: 'net_delta', label: 'Net Delta', num: true, render: r => el('span', { class: r.net_delta >= 0 ? 'bull' : 'bear' }, _fmtLakh(r.net_delta)) },
+      ];
+      optionVolumeContent.appendChild(buildSortableTable(cols, rows.slice().reverse()));
+    } catch (e) {
+      optionVolumeContent.innerHTML = `<div class="empty-state">Failed: ${e.message || 'unknown'}</div>`;
+    }
+  }
+
   // ENTRY SIGNALS TAB — the actual trade triggers, OI + Volume merged
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   // One chronological feed of every entry trigger the trade engine sees,

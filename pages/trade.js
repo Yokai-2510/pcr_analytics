@@ -162,6 +162,65 @@ async function renderConfigs(root) {
   root.appendChild(renderEntrySection(cfg));
   root.appendChild(renderInstrumentSection(cfg));
   root.appendChild(renderExitSection(cfg));
+  root.appendChild(renderPerStrategySection(cfg));
+}
+
+// ── Per-strategy configuration — every source gets its OWN block. Any
+// value set here overrides the global (legacy) value for that strategy only;
+// blank = inherit the global setting above.
+const STRAT_NUM_FIELDS = [
+  ['stop_loss_pct', 'SL %'], ['target_pct', 'Target %'],
+  ['trailing_sl_trigger_pct', 'TSL trigger %'], ['trailing_sl_step_pct', 'TSL step %'],
+  ['peak_trail_pct', 'Peak trail %'], ['cooldown_minutes', 'Cooldown (min)'],
+];
+const STRAT_BOOL_FIELDS = [
+  ['stop_loss_enabled', 'Stop loss'], ['target_enabled', 'Target'],
+  ['trailing_sl_enabled', 'Trailing SL'], ['peak_trail_enabled', 'Peak trail'],
+  ['time_exit_enabled', 'Time exit'], ['exit_on_counter_crossover', 'Exit on crossover'],
+];
+
+function renderPerStrategySection(cfg) {
+  cfg.strategies = cfg.strategies || {};
+  const NAMES = { oi: 'OI Crossover', volume: 'Volume Diff', vwap: 'VWAP Band', ltp: 'LTP Strength', optvol: 'Option Volume' };
+  const blocks = Object.keys(NAMES).map((src) => {
+    const scfg = cfg.strategies[src] = cfg.strategies[src] || {};
+    const grid = el('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', gap: '10px', marginTop: '8px' } });
+    STRAT_NUM_FIELDS.forEach(([key, label]) => {
+      const inp = el('input', { type: 'number', step: 'any', placeholder: `${cfg[key] ?? ''} (global)`, value: scfg[key] != null ? String(scfg[key]) : '' });
+      inp.onchange = () => {
+        const v = inp.value.trim();
+        if (v === '') delete scfg[key]; else scfg[key] = parseFloat(v);
+      };
+      grid.appendChild(el('label', { style: { display: 'flex', flexDirection: 'column', gap: '4px', fontSize: '12px' } }, el('span', { class: 'label' }, label), inp));
+    });
+    const timeInp = el('input', { type: 'text', placeholder: `${cfg.time_exit_at || ''} (global)`, value: scfg.time_exit_at || '' });
+    timeInp.onchange = () => { const v = timeInp.value.trim(); if (v === '') delete scfg.time_exit_at; else scfg.time_exit_at = v; };
+    grid.appendChild(el('label', { style: { display: 'flex', flexDirection: 'column', gap: '4px', fontSize: '12px' } }, el('span', { class: 'label' }, 'Time exit at'), timeInp));
+    const boolsRow = el('div', { style: { display: 'flex', gap: '16px', flexWrap: 'wrap', marginTop: '8px' } });
+    STRAT_BOOL_FIELDS.forEach(([key, label]) => {
+      const sel = el('select', {},
+        el('option', { value: '' }, `inherit (${cfg[key] ? 'on' : 'off'})`),
+        el('option', { value: 'on' }, 'on'),
+        el('option', { value: 'off' }, 'off'),
+      );
+      sel.value = scfg[key] === true ? 'on' : scfg[key] === false ? 'off' : '';
+      sel.onchange = () => {
+        if (sel.value === '') delete scfg[key]; else scfg[key] = sel.value === 'on';
+      };
+      boolsRow.appendChild(el('label', { style: { display: 'flex', flexDirection: 'column', gap: '4px', fontSize: '12px' } }, el('span', { class: 'label' }, label), sel));
+    });
+    return el('div', { class: 'card', style: { marginTop: '10px', padding: '12px 14px' } },
+      el('h4', { style: { margin: '0 0 2px' } }, NAMES[src]),
+      el('div', { class: 'dim', style: { fontSize: '11px' } }, `Overrides apply to the ${NAMES[src]} strategy only. Blank = inherit global.`),
+      grid, boolsRow,
+    );
+  });
+  const card = el('div', { class: 'card form-section' });
+  card.appendChild(el('h3', {}, 'Per-Strategy Configuration'));
+  const body = el('div', { class: 'form-section-body' });
+  blocks.forEach(b => body.appendChild(b));
+  card.appendChild(body);
+  return card;
 }
 
 function section(title, fields) {
@@ -200,8 +259,8 @@ function renderEntrySection(cfg) {
   // signal_mode is stored as a comma-joined list of active sources.
   // Legacy single-word values are mapped: 'both'/'combined' -> ['oi','volume'],
   // 'oi_only'->'oi', 'volume_only'->'volume', 'vwap_only'->'vwap'.
-  const SIG_SOURCES = ['oi', 'volume', 'vwap', 'ltp'];
-  const SIG_LABELS = { oi: 'OI', volume: 'Volume', vwap: 'VWAP', ltp: 'LTP Strength' };
+  const SIG_SOURCES = ['oi', 'volume', 'vwap', 'ltp', 'optvol'];
+  const SIG_LABELS = { oi: 'OI', volume: 'Volume', vwap: 'VWAP', ltp: 'LTP Strength', optvol: 'Option Volume' };
   function _parseSources(mode) {
     const aliases = { oi_only:'oi', volume_only:'volume', vwap_only:'vwap', ltp_only:'ltp', both:'oi,volume', combined:'oi,volume' };
     const resolved = aliases[mode] || mode || 'oi';
@@ -616,8 +675,8 @@ function paintSummary(card, summary, cfg, tab) {
 function paintPositions(card, positions, tab) {
   card.innerHTML = '';
   const cols = tab === 'open'
-    ? ['Time', 'Instrument', 'Strike', 'Type', 'Qty', 'Entry ₹', 'LTP ₹', 'P&L', 'Max ₹', 'SL', 'Target', '']
-    : ['Entered', 'Exited', 'Instrument', 'Strike', 'Type', 'Qty', 'Entry ₹', 'Exit ₹', 'P&L', 'Max ₹', 'Reason'];
+    ? ['Time', 'Instrument', 'Strategy', 'Strike', 'Type', 'Qty', 'Entry ₹', 'LTP ₹', 'P&L', 'Max ₹', 'SL', 'Target', '']
+    : ['Entered', 'Exited', 'Instrument', 'Strategy', 'Strike', 'Type', 'Qty', 'Entry ₹', 'Exit ₹', 'P&L', 'Max ₹', 'Reason'];
 
   const table = el('table', { class: 'data-table', style: { width: '100%' } });
   table.appendChild(el('thead', {},
@@ -652,7 +711,7 @@ function paintPositions(card, positions, tab) {
 // Short source tag for the positions tables. Must cover every signal source —
 // the old inline ternary only knew 'volume' and mislabeled vwap/ltp as "OI".
 function _srcLabel(s) {
-  return ({ oi: 'OI', volume: 'VOL', vwap: 'VWAP', ltp: 'LTP' })[s || 'oi'] || String(s).toUpperCase();
+  return ({ oi: 'OI', volume: 'VOL', vwap: 'VWAP', ltp: 'LTP', optvol: 'OPTVOL' })[s || 'oi'] || String(s).toUpperCase();
 }
 
 // Highest profit reached = (peak LTP since entry − entry) × qty. The engine
@@ -667,7 +726,8 @@ function openRow(p) {
   const pnl = p.unrealized_pnl;
   return el('tr', { class: 'data-row' },
     cell(fmtTime(p.entry_time)),
-    cell(`${p.instrument} · ${_srcLabel(p.source)}`),
+    cell(p.instrument),
+    cell(_srcLabel(p.source)),
     cell(p.strike),
     cell(p.option_type, p.option_type === 'CE' ? 'bull' : 'bear'),
     cell(p.qty),
@@ -698,7 +758,8 @@ function closedRow(p) {
   return el('tr', { class: 'data-row' },
     cell(fmtTime(p.entry_time)),
     cell(fmtTime(p.exit_time)),
-    cell(`${p.instrument} · ${_srcLabel(p.source)}`),
+    cell(p.instrument),
+    cell(_srcLabel(p.source)),
     cell(p.strike),
     cell(p.option_type, p.option_type === 'CE' ? 'bull' : 'bear'),
     cell(p.qty),

@@ -58,6 +58,7 @@ export const api = {
   totalOi: (ins, date) => fetchJson(`/api/total-oi/${ins}${date ? `?date=${date}` : ''}`),
   totalVolume: (ins, date) => fetchJson(`/api/total-volume/${ins}${date ? `?date=${date}` : ''}`),
   optionChain: (ins, date) => fetchJson(`/api/option-chain/${ins}${date ? `?date=${date}` : ''}`),
+  optionVolume: (ins, date) => fetchJson(`/api/option-volume/${ins}${date ? `?date=${date}` : ''}`),
   ltpStrength: (ins, date) => fetchJson(`/api/ltp-strength/${ins}${date ? `?date=${date}` : ''}`),
   ltpStrengthSnapshot: (ins, date) => fetchJson(`/api/ltp-strength-snapshot/${ins}${date ? `?date=${date}` : ''}`),
   srHistory: (ins, date) => fetchJson(`/api/sr-history/${ins}${date ? `?date=${date}` : ''}`),

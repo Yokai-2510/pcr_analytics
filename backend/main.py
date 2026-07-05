@@ -117,6 +117,14 @@ def stop_compute_thread() -> None:
 
 
 def run_fetch_tick(expiries: dict[str, str], *, persist: bool = True) -> dict[str, object]:
+    # Universal websocket transport: idempotent start; once live it feeds
+    # every fetch below (REST remains the automatic fallback).
+    try:
+        import ws_engine
+
+        ws_engine.ENGINE.start(expiries)
+    except Exception:
+        logger.exception("ws_engine start failed; continuing on REST")
     raw_data = market_data.fetch_option_chains(expiries)
     fetch_summary = market_data.summarize_fetch(raw_data)
     if persist:

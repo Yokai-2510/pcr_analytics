@@ -84,6 +84,10 @@ def _evaluate_one_exit(
 
     ltp = strikes.latest_ltp(instrument, strike, side, today)
 
+    # Per-strategy effective config: this position's source drives every
+    # exit knob below (segregated configs; legacy top-level = fallback).
+    config = persistence.source_cfg(config, str(position.get("source") or "oi"))
+
     # Priority 0/1: forced closes (manual + end-of-day) must fire even if the
     # live LTP feed has already stopped (e.g. right after 15:30) — otherwise a
     # position can be left dangling OPEN past the close. Fall back to the entry
@@ -508,6 +512,48 @@ def _ltp_signal(
     }
 
 
+def _optvol_signal(
+    instrument: str,
+    date: str,
+    after_iso: str | None = None,
+) -> dict[str, Any] | None:
+    """Option Volume strategy — trade the side whose executed-volume DELTA
+    leads (CE delta > PE delta -> BUY CE; PE leads -> BUY PE).
+
+    Signals come LIVE from the websocket engine's per-tick aggressor
+    accumulators (quote rule over the dynamic ATM band). Transition-based:
+    the first directional reading seeds the side, then only genuine flips
+    emit — so after a target/SL exit the engine stays flat until the NEXT
+    reversal, which enters the OPPOSITE side (crossover is both the exit
+    and the only entry trigger, same semantics as the other sources).
+    """
+    try:
+        import ws_engine
+
+        state = ws_engine.ENGINE.optvol_state(instrument)
+    except Exception:
+        return None
+    if not state or not state.get("transitions"):
+        return None
+    last = state["transitions"][-1]
+    ts = str(last.get("timestamp") or "")
+    if not ts.startswith(date):
+        return None
+    if after_iso and ts <= str(after_iso):
+        return None
+    return {
+        "timestamp": ts,
+        "signal": last.get("signal"),
+        "ce_delta": last.get("ce_delta"),
+        "pe_delta": last.get("pe_delta"),
+        "net_delta": last.get("net_delta"),
+        "oi_difference": None,
+        "pcr": None,
+        "ce_oi_cumm_change": None,
+        "pe_oi_cumm_change": None,
+    }
+
+
 def _maybe_ratchet_tsl(
     position: dict[str, Any],
     ltp: float,
@@ -662,13 +708,14 @@ def _active_sources(signal_mode: str) -> list[str]:
         "volume_only": ["volume"],
         "vwap_only": ["vwap"],
         "ltp_only": ["ltp"],
+        "optvol_only": ["optvol"],
         "both": ["oi", "volume"],
         "combined": ["oi", "volume"],
     }
     if mode in aliases:
         return aliases[mode]
     # Comma-separated list of sources e.g. "oi,vwap,ltp"
-    parts = [p.strip() for p in mode.split(",") if p.strip() in ("oi", "volume", "vwap", "ltp")]
+    parts = [p.strip() for p in mode.split(",") if p.strip() in ("oi", "volume", "vwap", "ltp", "optvol")]
     return parts if parts else ["oi"]
 
 
@@ -680,6 +727,8 @@ def _source_signal(source: str, instrument: str, date: str, after_iso: str | Non
         return _vwap_signal(instrument, date, after_iso)
     if source == "ltp":
         return _ltp_signal(instrument, date, after_iso)
+    if source == "optvol":
+        return _optvol_signal(instrument, date, after_iso)
     return _oi_signal(instrument, date, after_iso)
 
 
@@ -709,6 +758,9 @@ def _evaluate_one_entry_source(
     # a source, but OI and volume each get their own independent leg.
     if persistence.has_open_for_instrument_source(instrument, source):
         return  # silent; we'd flood the audit log otherwise
+
+    # Per-strategy effective config for every entry knob below.
+    config = persistence.source_cfg(config, source)
 
     # Gate: cooldown (per instrument+source)
     cooldown_min = int(config.get("cooldown_minutes") or 0)

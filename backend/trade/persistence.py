@@ -196,7 +196,35 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "no_entry_after": "15:25",   # stop opening NEW positions this late (intraday
                                  # churn guard); existing positions still managed
     "max_positions_per_day": 3,
+    # Per-strategy overrides — every source has its OWN complete block; any
+    # key set here beats the legacy top-level value for that source only.
+    "strategies": {
+        "oi": {},
+        "volume": {},
+        "vwap": {},
+        "ltp": {},
+        "optvol": {},
+    },
 }
+
+PER_SOURCE_KEYS = (
+    "cooldown_minutes", "strike_mode", "custom_steps", "lots",
+    "exit_on_counter_crossover", "stop_loss_enabled", "stop_loss_pct",
+    "trailing_sl_enabled", "trailing_sl_trigger_pct", "trailing_sl_step_pct",
+    "target_enabled", "target_pct", "peak_trail_enabled", "peak_trail_pct",
+    "time_exit_enabled", "time_exit_at", "no_entry_after",
+)
+
+
+def source_cfg(config: dict[str, Any], source: str) -> dict[str, Any]:
+    """Effective config for ONE strategy: legacy top-level values overridden
+    by that strategy's own `strategies.{source}` block."""
+    merged = dict(config)
+    override = (config.get("strategies") or {}).get(source) or {}
+    for key, value in override.items():
+        if value is not None and value != "":
+            merged[key] = value
+    return merged
 
 
 def get_active_config() -> dict[str, Any]:
@@ -216,6 +244,11 @@ def get_active_config() -> dict[str, Any]:
         saved = {}
     merged = dict(DEFAULT_CONFIG)
     merged.update(saved)
+    strategies = {k: dict(v) for k, v in DEFAULT_CONFIG["strategies"].items()}
+    for src, blk in (saved.get("strategies") or {}).items():
+        if isinstance(blk, dict):
+            strategies.setdefault(src, {}).update(blk)
+    merged["strategies"] = strategies
     return merged
 
 
