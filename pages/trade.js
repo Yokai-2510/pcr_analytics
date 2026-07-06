@@ -159,68 +159,137 @@ async function renderConfigs(root) {
   );
 
   root.appendChild(saveBar);
-  root.appendChild(renderEntrySection(cfg));
-  root.appendChild(renderInstrumentSection(cfg));
-  root.appendChild(renderExitSection(cfg));
-  root.appendChild(renderPerStrategySection(cfg));
+
+  // ── One tab per strategy: everything that strategy owns lives in its
+  // tab (enabled, entry knobs, full exit conditions). Global holds the
+  // shared plumbing + the inherited defaults.
+  const cfgTabs = [{ id: 'global', label: 'Global' },
+    ...SIG_SOURCES.map(s => ({ id: s, label: SIG_NAMES[s] }))];
+  const tabBar = el('div', { class: 'tabs', style: { margin: '4px 0 12px' } });
+  const panels = {};
+  let activeCfgTab = 'global';
+  const tabBtns = {};
+  cfgTabs.forEach(t => {
+    const btn = el('button', {
+      class: 'tab' + (t.id === activeCfgTab ? ' active' : ''),
+      onclick: () => {
+        activeCfgTab = t.id;
+        Object.entries(tabBtns).forEach(([id, b]) => b.classList.toggle('active', id === t.id));
+        Object.entries(panels).forEach(([id, p]) => { p.style.display = id === t.id ? '' : 'none'; });
+      },
+    }, t.label);
+    tabBtns[t.id] = btn;
+    tabBar.appendChild(btn);
+  });
+  root.appendChild(tabBar);
+
+  const globalPanel = el('div');
+  globalPanel.appendChild(renderEntrySection(cfg));
+  globalPanel.appendChild(renderInstrumentSection(cfg));
+  globalPanel.appendChild(renderExitSection(cfg));
+  panels['global'] = globalPanel;
+  root.appendChild(globalPanel);
+
+  SIG_SOURCES.forEach(src => {
+    const panel = el('div', { style: { display: 'none' } });
+    panel.appendChild(renderStrategyTab(cfg, src));
+    panels[src] = panel;
+    root.appendChild(panel);
+  });
 }
 
-// ── Per-strategy configuration — every source gets its OWN block. Any
-// value set here overrides the global (legacy) value for that strategy only;
-// blank = inherit the global setting above.
-const STRAT_NUM_FIELDS = [
-  ['stop_loss_pct', 'SL %'], ['target_pct', 'Target %'],
-  ['trailing_sl_trigger_pct', 'TSL trigger %'], ['trailing_sl_step_pct', 'TSL step %'],
-  ['peak_trail_pct', 'Peak trail %'], ['cooldown_minutes', 'Cooldown (min)'],
-];
-const STRAT_BOOL_FIELDS = [
-  ['stop_loss_enabled', 'Stop loss'], ['target_enabled', 'Target'],
-  ['trailing_sl_enabled', 'Trailing SL'], ['peak_trail_enabled', 'Peak trail'],
-  ['time_exit_enabled', 'Time exit'], ['exit_on_counter_crossover', 'Exit on crossover'],
-];
+// ── Per-strategy tab — EVERYTHING one strategy owns: enabled state,
+// entry knobs and its complete exit stack. Values initialize from the
+// effective setting (its own override, else the global default) and are
+// written to strategies.{src}; the engine resolves them per position.
+function renderStrategyTab(cfg, src) {
+  const wrap = el('div');
+  const scfg = () => (cfg.strategies && cfg.strategies[src]) || {};
+  const eff = (key) => {
+    const s = scfg();
+    return s[key] !== undefined && s[key] !== null && s[key] !== '' ? s[key] : cfg[key];
+  };
+  function setS(key, value) {
+    const strategies = { ...(cfg.strategies || {}) };
+    const block = { ...(strategies[src] || {}) };
+    if (value === undefined) delete block[key]; else block[key] = value;
+    strategies[src] = block;
+    cfg.strategies = strategies; // top-level assignment -> dirty tracking
+  }
 
-function renderPerStrategySection(cfg) {
-  cfg.strategies = cfg.strategies || {};
-  const NAMES = { oi: 'OI Crossover', volume: 'Volume Diff', vwap: 'VWAP Band', ltp: 'LTP Strength', optvol: 'Option Volume' };
-  const blocks = Object.keys(NAMES).map((src) => {
-    const scfg = cfg.strategies[src] = cfg.strategies[src] || {};
-    const grid = el('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', gap: '10px', marginTop: '8px' } });
-    STRAT_NUM_FIELDS.forEach(([key, label]) => {
-      const inp = el('input', { type: 'number', step: 'any', placeholder: `${cfg[key] ?? ''} (global)`, value: scfg[key] != null ? String(scfg[key]) : '' });
-      inp.onchange = () => {
-        const v = inp.value.trim();
-        if (v === '') delete scfg[key]; else scfg[key] = parseFloat(v);
-      };
-      grid.appendChild(el('label', { style: { display: 'flex', flexDirection: 'column', gap: '4px', fontSize: '12px' } }, el('span', { class: 'label' }, label), inp));
-    });
-    const timeInp = el('input', { type: 'text', placeholder: `${cfg.time_exit_at || ''} (global)`, value: scfg.time_exit_at || '' });
-    timeInp.onchange = () => { const v = timeInp.value.trim(); if (v === '') delete scfg.time_exit_at; else scfg.time_exit_at = v; };
-    grid.appendChild(el('label', { style: { display: 'flex', flexDirection: 'column', gap: '4px', fontSize: '12px' } }, el('span', { class: 'label' }, 'Time exit at'), timeInp));
-    const boolsRow = el('div', { style: { display: 'flex', gap: '16px', flexWrap: 'wrap', marginTop: '8px' } });
-    STRAT_BOOL_FIELDS.forEach(([key, label]) => {
-      const sel = el('select', {},
-        el('option', { value: '' }, `inherit (${cfg[key] ? 'on' : 'off'})`),
-        el('option', { value: 'on' }, 'on'),
-        el('option', { value: 'off' }, 'off'),
-      );
-      sel.value = scfg[key] === true ? 'on' : scfg[key] === false ? 'off' : '';
-      sel.onchange = () => {
-        if (sel.value === '') delete scfg[key]; else scfg[key] = sel.value === 'on';
-      };
-      boolsRow.appendChild(el('label', { style: { display: 'flex', flexDirection: 'column', gap: '4px', fontSize: '12px' } }, el('span', { class: 'label' }, label), sel));
-    });
-    return el('div', { class: 'card', style: { marginTop: '10px', padding: '12px 14px' } },
-      el('h4', { style: { margin: '0 0 2px' } }, NAMES[src]),
-      el('div', { class: 'dim', style: { fontSize: '11px' } }, `Overrides apply to the ${NAMES[src]} strategy only. Blank = inherit global.`),
-      grid, boolsRow,
-    );
+  // ── Status ──
+  const enabled = _parseSources(cfg.signal_mode || 'oi_only').includes(src);
+  const enableToggle = Toggle({
+    value: enabled,
+    onChange: (on) => {
+      const active = _parseSources(cfg.signal_mode || 'oi_only').filter(s => s !== src);
+      if (on) active.push(src);
+      cfg.signal_mode = _sourcesToMode(active);
+    },
   });
-  const card = el('div', { class: 'card form-section' });
-  card.appendChild(el('h3', {}, 'Per-Strategy Configuration'));
-  const body = el('div', { class: 'form-section-body' });
-  blocks.forEach(b => body.appendChild(b));
-  card.appendChild(body);
-  return card;
+  wrap.appendChild(section(`${SIG_NAMES[src]} — Status`, [
+    FormField({
+      label: 'Strategy enabled',
+      input: enableToggle.el,
+      hint: SIG_DESC[src] + ' Runs independently — one position per instrument for this strategy.',
+    }),
+  ]));
+
+  // ── field builders (write per-strategy overrides) ──
+  function numField(key, label, hint, unit) {
+    const inp = el('input', { type: 'number', step: 'any', value: eff(key) != null ? String(eff(key)) : '' });
+    inp.onchange = () => {
+      const v = inp.value.trim();
+      setS(key, v === '' ? undefined : parseFloat(v));
+    };
+    return FormField({ label, input: unit ? [inp, el('span', { class: 'unit' }, unit)] : inp, hint });
+  }
+  function textField(key, label, hint, placeholder) {
+    const inp = el('input', { type: 'text', value: eff(key) || '', placeholder: placeholder || '' });
+    inp.onchange = () => {
+      const v = inp.value.trim();
+      setS(key, v === '' ? undefined : v);
+    };
+    return FormField({ label, input: inp, hint });
+  }
+  function boolField(key, label, hint) {
+    const tgl = Toggle({ value: !!eff(key), onChange: (on) => setS(key, on) });
+    return FormField({ label, input: tgl.el, hint });
+  }
+
+  // ── Entry ──
+  const strikeSel = el('select', {},
+    el('option', { value: 'atm' }, 'ATM'),
+    el('option', { value: 'custom' }, 'Custom steps'),
+  );
+  strikeSel.value = String(eff('strike_mode') || 'atm');
+  strikeSel.onchange = () => setS('strike_mode', strikeSel.value);
+  wrap.appendChild(section(`${SIG_NAMES[src]} — Entry`, [
+    FormField({ label: 'Strike selection', input: strikeSel, hint: 'ATM buys the at-the-money strike; Custom offsets by N steps.' }),
+    numField('custom_steps', 'Custom steps', 'Steps away from ATM when strike selection is Custom.'),
+    numField('lots', 'Lots', 'Lots per entry for this strategy.'),
+    numField('cooldown_minutes', 'Cooldown (minutes)', 'Minimum gap between this strategy\'s entries on the same underlying.', 'min'),
+    textField('no_entry_after', 'No entries after', 'HH:MM — this strategy stops opening new positions after this time.', 'e.g. 15:25'),
+  ]));
+
+  // ── Exit conditions ──
+  wrap.appendChild(section(`${SIG_NAMES[src]} — Exit Conditions`, [
+    boolField('exit_on_counter_crossover', 'Exit on counter-crossover',
+      'The opposite signal closes this strategy\'s leg (and the engine re-opens the new side).'),
+    boolField('stop_loss_enabled', 'Stop loss'),
+    numField('stop_loss_pct', 'Stop loss %', 'Exit when the premium falls this % below entry.', '%'),
+    boolField('target_enabled', 'Target'),
+    numField('target_pct', 'Target %', 'Book profit when the premium rises this % above entry.', '%'),
+    boolField('trailing_sl_enabled', 'Trailing stop loss'),
+    numField('trailing_sl_trigger_pct', 'TSL trigger %', 'Arm the trailing stop once this profit % is reached.', '%'),
+    numField('trailing_sl_step_pct', 'TSL step %', 'Trail this % below the peak once armed.', '%'),
+    boolField('peak_trail_enabled', 'Peak trail'),
+    numField('peak_trail_pct', 'Peak trail %', 'Once in profit, exit if the premium retraces below this % of its peak.', '%'),
+    boolField('time_exit_enabled', 'Time exit'),
+    textField('time_exit_at', 'Time exit at', 'HH:MM — force-close this strategy\'s open positions at this time.', 'e.g. 15:15'),
+  ]));
+
+  return wrap;
 }
 
 function section(title, fields) {
@@ -255,37 +324,6 @@ function renderEntrySection(cfg) {
     value: cfg.auto_execute,
     onChange: (on) => { cfg.auto_execute = on; },
   });
-
-  // signal_mode is stored as a comma-joined list of active sources.
-  // Legacy single-word values are mapped: 'both'/'combined' -> ['oi','volume'],
-  // 'oi_only'->'oi', 'volume_only'->'volume', 'vwap_only'->'vwap'.
-  const SIG_SOURCES = ['oi', 'volume', 'vwap', 'ltp', 'optvol'];
-  const SIG_LABELS = { oi: 'OI', volume: 'Volume', vwap: 'VWAP', ltp: 'LTP Strength', optvol: 'Option Volume' };
-  function _parseSources(mode) {
-    const aliases = { oi_only:'oi', volume_only:'volume', vwap_only:'vwap', ltp_only:'ltp', both:'oi,volume', combined:'oi,volume' };
-    const resolved = aliases[mode] || mode || 'oi';
-    return resolved.split(',').map(s => s.trim()).filter(s => SIG_SOURCES.includes(s));
-  }
-  function _sourcesToMode(arr) { return arr.length ? arr.join(',') : 'oi'; }
-
-  const activeSources = _parseSources(cfg.signal_mode || 'oi_only');
-  const sigChecks = {};
-  SIG_SOURCES.forEach(src => {
-    const cb = el('input', { type: 'checkbox', id: `sig_${src}` });
-    cb.checked = activeSources.includes(src);
-    cb.onchange = () => {
-      const active = SIG_SOURCES.filter(s => sigChecks[s].checked);
-      cfg.signal_mode = _sourcesToMode(active.length ? active : ['oi']); // at least one
-      if (!active.length) sigChecks['oi'].checked = true;
-    };
-    sigChecks[src] = cb;
-  });
-  const signalModeEl = el('div', { style: { display: 'flex', gap: '18px', alignItems: 'center', flexWrap: 'wrap' } },
-    ...SIG_SOURCES.map(src => el('label', { style: { display: 'flex', gap: '6px', alignItems: 'center', fontSize: '13px', cursor: 'pointer', fontWeight: 500 } },
-      sigChecks[src],
-      el('span', {}, SIG_LABELS[src])
-    ))
-  );
 
   const directionRules = el('div', {
     style: {
@@ -323,11 +361,6 @@ function renderEntrySection(cfg) {
       hint: 'When off, signals appear in the Data tab but no orders fire.',
     }),
     FormField({
-      label: 'Entry signal source',
-      input: signalModeEl,
-      hint: 'Each checked source runs independently — one position per source per instrument. OI: cumulative OI diff crossover. Volume: cumulative volume diff crossover. VWAP: spot vs session VWAP (post 09:20 warm-up, 0.05% band).',
-    }),
-    FormField({
       label: 'Entry direction (auto)',
       input: directionRules,
       hint: 'Whichever side’s cumulative OI change was lower just before the crossover is the side that gets bought. No configuration — the rule is fixed.',
@@ -335,10 +368,30 @@ function renderEntrySection(cfg) {
     FormField({
       label: 'Cooldown (minutes)',
       input: [cooldownInput, el('span', { class: 'unit' }, 'min')],
-      hint: 'Minimum gap between consecutive entries on the same underlying.',
+      hint: 'Global default — each strategy tab can set its own.',
     }),
   ]);
 }
+
+// ── Strategy sources (shared by the per-strategy tabs) ──────────────────
+const SIG_SOURCES = ['oi', 'volume', 'vwap', 'ltp', 'optvol'];
+const SIG_NAMES = {
+  oi: 'OI Crossover', volume: 'Volume Diff', vwap: 'VWAP Band',
+  ltp: 'LTP Strength', optvol: 'Option Volume',
+};
+const SIG_DESC = {
+  oi: 'Cumulative OI difference (PE − CE) sign crossover.',
+  volume: 'ATM-band cumulative volume difference crossover.',
+  vwap: 'Spot vs session VWAP with a 0.05% band; fresh crossovers only.',
+  ltp: 'Dr. Vijay LTP option-strength regime (session sums + rolling + VWAP).',
+  optvol: 'Aggressor-classified option volume: trades the side whose executed delta leads (live per tick from the websocket).',
+};
+function _parseSources(mode) {
+  const aliases = { oi_only: 'oi', volume_only: 'volume', vwap_only: 'vwap', ltp_only: 'ltp', optvol_only: 'optvol', both: 'oi,volume', combined: 'oi,volume' };
+  const resolved = aliases[mode] || mode || 'oi';
+  return resolved.split(',').map(s => s.trim()).filter(s => SIG_SOURCES.includes(s));
+}
+function _sourcesToMode(arr) { return arr.length ? arr.join(',') : 'oi'; }
 
 function renderInstrumentSection(cfg) {
   const instPicker = ChipMultiPicker({

@@ -762,6 +762,16 @@ def _evaluate_one_entry_source(
     # Per-strategy effective config for every entry knob below.
     config = persistence.source_cfg(config, source)
 
+    # Per-strategy entry cutoff (each strategy tab has its own; the global
+    # cutoff in _evaluate_entries still applies as the outer bound).
+    src_cutoff = str(config.get("no_entry_after") or "").strip()
+    if src_cutoff:
+        try:
+            if _at_or_after(now, _parse_hhmm(src_cutoff)):
+                return
+        except (ValueError, TypeError):
+            pass
+
     # Gate: cooldown (per instrument+source)
     cooldown_min = int(config.get("cooldown_minutes") or 0)
     if cooldown_min > 0:
