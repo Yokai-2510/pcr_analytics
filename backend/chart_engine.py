@@ -313,10 +313,106 @@ METRICS: dict[str, MetricDef] = {
         ),
         strike_sql="AVG(s.pe_oi)",
     ),
+    "oi_diff_cumm": MetricDef(
+        id="oi_diff_cumm",
+        label="OI Difference (PE−CE cumm)",
+        group="strategy",
+        description="The OI Crossover strategy signal line: cumulative PE OI "
+        "change minus cumulative CE OI change from the first tick. Sign flip "
+        "= crossover (positive → BUY CE regime, negative → BUY PE).",
+        unit="contracts",
+        color="#f59e0b",
+        axis="left",
+        aggregate_sql=(
+            "(SUM(COALESCE(s.pe_oi, 0)) - COALESCE((SELECT SUM(COALESCE(f.pe_oi, 0)) FROM oi_snapshots f WHERE f.instrument = s.instrument AND f.timestamp = (SELECT MIN(timestamp) FROM oi_snapshots WHERE instrument = s.instrument AND substr(timestamp, 1, 10) = substr(s.timestamp, 1, 10))), 0))"
+            " - "
+            "(SUM(COALESCE(s.ce_oi, 0)) - COALESCE((SELECT SUM(COALESCE(f.ce_oi, 0)) FROM oi_snapshots f WHERE f.instrument = s.instrument AND f.timestamp = (SELECT MIN(timestamp) FROM oi_snapshots WHERE instrument = s.instrument AND substr(timestamp, 1, 10) = substr(s.timestamp, 1, 10))), 0))"
+        ),
+        strike_sql="AVG(COALESCE(s.pe_oi, 0)) - AVG(COALESCE(s.ce_oi, 0))",
+    ),
+    "volume_diff": MetricDef(
+        id="volume_diff",
+        label="Volume Difference (PE−CE)",
+        group="strategy",
+        description="The Volume Diff strategy signal line: total put volume "
+        "minus total call volume. Negative (CE heavier) → BUY CE regime; "
+        "positive → BUY PE. Sign flip = crossover.",
+        unit="contracts",
+        color="#38bdf8",
+        axis="left",
+        aggregate_sql="SUM(COALESCE(s.pe_volume, 0)) - SUM(COALESCE(s.ce_volume, 0))",
+        strike_sql="AVG(COALESCE(s.pe_volume, 0)) - AVG(COALESCE(s.ce_volume, 0))",
+    ),
+    "ltp_diff_cumm": MetricDef(
+        id="ltp_diff_cumm",
+        label="LTP Strength (CE−PE session Δ)",
+        group="strategy",
+        description="The LTP Strength directional line: session change of the "
+        "summed CE premiums minus session change of summed PE premiums "
+        "(across the chain window). Positive and rising supports BUY CE; "
+        "negative and falling supports BUY PE.",
+        unit="price",
+        color="#c084fc",
+        axis="left",
+        aggregate_sql=(
+            "(SUM(COALESCE(s.ce_ltp, 0)) - COALESCE((SELECT SUM(COALESCE(f.ce_ltp, 0)) FROM oi_snapshots f WHERE f.instrument = s.instrument AND f.timestamp = (SELECT MIN(timestamp) FROM oi_snapshots WHERE instrument = s.instrument AND substr(timestamp, 1, 10) = substr(s.timestamp, 1, 10))), 0))"
+            " - "
+            "(SUM(COALESCE(s.pe_ltp, 0)) - COALESCE((SELECT SUM(COALESCE(f.pe_ltp, 0)) FROM oi_snapshots f WHERE f.instrument = s.instrument AND f.timestamp = (SELECT MIN(timestamp) FROM oi_snapshots WHERE instrument = s.instrument AND substr(timestamp, 1, 10) = substr(s.timestamp, 1, 10))), 0))"
+        ),
+        strike_sql="AVG(COALESCE(s.ce_ltp, 0)) - AVG(COALESCE(s.pe_ltp, 0))",
+    ),
 }
 
 
 CHART_PRESETS: list[dict[str, Any]] = [
+    {
+        "id": "strategy-oi-crossover",
+        "name": "Strategy · OI Crossover",
+        "description": "CE/PE cumulative OI change + the PE−CE signal line whose sign flips are the strategy's crossovers.",
+        "config": {
+            "instrument": "nifty",
+            "metrics": ["ce_oi_cumm", "pe_oi_cumm", "oi_diff_cumm", "underlying_spot_price"],
+            "strike_mode": "aggregate",
+            "baseline": "post_settlement",
+            "chart_type": "line",
+        },
+    },
+    {
+        "id": "strategy-volume-diff",
+        "name": "Strategy · Volume Diff",
+        "description": "Call vs put volume + the PE−CE volume signal line (negative = CE regime, positive = PE regime).",
+        "config": {
+            "instrument": "nifty",
+            "metrics": ["ce_volume", "pe_volume", "volume_diff"],
+            "strike_mode": "aggregate",
+            "baseline": "post_settlement",
+            "chart_type": "line",
+        },
+    },
+    {
+        "id": "strategy-ltp-strength",
+        "name": "Strategy · LTP Strength",
+        "description": "CE/PE premium levels + the CE−PE session-change strength line the LTP strategy trades.",
+        "config": {
+            "instrument": "nifty",
+            "metrics": ["ce_ltp", "pe_ltp", "ltp_diff_cumm", "underlying_spot_price"],
+            "strike_mode": "aggregate",
+            "baseline": "post_settlement",
+            "chart_type": "line",
+        },
+    },
+    {
+        "id": "strategy-vwap-context",
+        "name": "Strategy · VWAP / Flow Context",
+        "description": "Spot with PCR + volume PCR + ΔPCR — the flow backdrop for the VWAP and Option Volume strategies.",
+        "config": {
+            "instrument": "nifty",
+            "metrics": ["underlying_spot_price", "pcr", "volume_pcr", "delta_pcr"],
+            "strike_mode": "aggregate",
+            "baseline": "post_settlement",
+            "chart_type": "line",
+        },
+    },
     {
         "id": "pcr-with-spot",
         "name": "Put-Call Ratio",
