@@ -261,13 +261,15 @@ function renderStrategyTab(cfg, src) {
   // ── Entry ──
   const strikeSel = el('select', {},
     el('option', { value: 'atm' }, 'ATM'),
-    el('option', { value: 'custom' }, 'Custom steps'),
+    el('option', { value: 'itm_1' }, 'ITM 1'),
+    el('option', { value: 'itm_2' }, 'ITM 2'),
+    el('option', { value: 'custom_steps' }, 'Custom steps'),
   );
   strikeSel.value = String(eff('strike_mode') || 'atm');
   strikeSel.onchange = () => setS('strike_mode', strikeSel.value);
   wrap.appendChild(section(`${SIG_NAMES[src]} — Entry`, [
-    FormField({ label: 'Strike selection', input: strikeSel, hint: 'ATM buys the at-the-money strike; Custom offsets by N steps.' }),
-    numField('custom_steps', 'Custom steps', 'Steps away from ATM when strike selection is Custom.'),
+    FormField({ label: 'Strike selection', input: strikeSel, hint: 'ITM is side-aware: CE buys below ATM, PE above. Custom: +N steps = N strikes ITM, −N = OTM.' }),
+    numField('custom_steps', 'Custom steps', 'Used when Strike selection is Custom: positive = ITM steps, negative = OTM steps (direction auto-adjusts per CE/PE).'),
     numField('lots', 'Lots', 'Lots per entry for this strategy.'),
     numField('cooldown_minutes', 'Cooldown (minutes)', 'Minimum gap between this strategy\'s entries on the same underlying.', 'min'),
     textField('no_entry_after', 'No entries after', 'HH:MM — this strategy stops opening new positions after this time.', 'e.g. 15:25'),
