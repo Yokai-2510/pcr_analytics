@@ -172,6 +172,28 @@ def _migrate_source_columns(conn: sqlite3.Connection) -> None:
 # ── Config ─────────────────────────────────────────────────────────────
 
 
+# The concrete per-strategy configuration every source starts with —
+# exactly the values the system was running before segregation.
+_DEFAULT_SOURCE_BLOCK: dict[str, Any] = {
+    "strike_mode": "atm",
+    "custom_steps": 0,
+    "lots": 1,
+    "cooldown_minutes": 0,
+    "no_entry_after": "15:25",
+    "exit_on_counter_crossover": True,
+    "stop_loss_enabled": True,
+    "stop_loss_pct": 30,
+    "trailing_sl_enabled": False,
+    "trailing_sl_trigger_pct": 20,
+    "trailing_sl_step_pct": 10,
+    "target_enabled": True,
+    "target_pct": 50,
+    "peak_trail_enabled": False,
+    "peak_trail_pct": 80,
+    "time_exit_enabled": True,
+    "time_exit_at": "15:15",
+}
+
 DEFAULT_CONFIG: dict[str, Any] = {
     "mode": "paper",
     "auto_execute": False,
@@ -196,14 +218,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "no_entry_after": "15:25",   # stop opening NEW positions this late (intraday
                                  # churn guard); existing positions still managed
     "max_positions_per_day": 3,
-    # Per-strategy overrides — every source has its OWN complete block; any
-    # key set here beats the legacy top-level value for that source only.
+    # Each strategy owns its FULL configuration — there is no universal
+    # per-strategy system. The blocks below are seeded with the values the
+    # system ran with before segregation; the legacy top-level keys above
+    # remain only as a fallback for configs saved before this change.
     "strategies": {
-        "oi": {},
-        "volume": {},
-        "vwap": {},
-        "ltp": {},
-        "optvol": {},
+        src: dict(_DEFAULT_SOURCE_BLOCK) for src in ("oi", "volume", "vwap", "ltp", "optvol")
     },
 }
 
@@ -244,10 +264,12 @@ def get_active_config() -> dict[str, Any]:
         saved = {}
     merged = dict(DEFAULT_CONFIG)
     merged.update(saved)
-    strategies = {k: dict(v) for k, v in DEFAULT_CONFIG["strategies"].items()}
+    # Every strategy block is fully populated: defaults <- saved overrides,
+    # so each strategy is complete and concrete on its own.
+    strategies = {k: dict(_DEFAULT_SOURCE_BLOCK) for k in DEFAULT_CONFIG["strategies"]}
     for src, blk in (saved.get("strategies") or {}).items():
         if isinstance(blk, dict):
-            strategies.setdefault(src, {}).update(blk)
+            strategies.setdefault(src, dict(_DEFAULT_SOURCE_BLOCK)).update(blk)
     merged["strategies"] = strategies
     return merged
 

@@ -186,7 +186,6 @@ async function renderConfigs(root) {
   const globalPanel = el('div');
   globalPanel.appendChild(renderEntrySection(cfg));
   globalPanel.appendChild(renderInstrumentSection(cfg));
-  globalPanel.appendChild(renderExitSection(cfg));
   panels['global'] = globalPanel;
   root.appendChild(globalPanel);
 
@@ -204,16 +203,16 @@ async function renderConfigs(root) {
 // written to strategies.{src}; the engine resolves them per position.
 function renderStrategyTab(cfg, src) {
   const wrap = el('div');
+  // Concrete per-strategy config: the backend returns a fully populated
+  // block for every strategy — no universal fallback system.
   const scfg = () => (cfg.strategies && cfg.strategies[src]) || {};
   const eff = (key) => {
-    const s = scfg();
-    return s[key] !== undefined && s[key] !== null && s[key] !== '' ? s[key] : cfg[key];
+    const v = scfg()[key];
+    return v !== undefined && v !== null ? v : cfg[key];
   };
   function setS(key, value) {
     const strategies = { ...(cfg.strategies || {}) };
-    const block = { ...(strategies[src] || {}) };
-    if (value === undefined) delete block[key]; else block[key] = value;
-    strategies[src] = block;
+    strategies[src] = { ...(strategies[src] || {}), [key]: value };
     cfg.strategies = strategies; // top-level assignment -> dirty tracking
   }
 
@@ -240,7 +239,8 @@ function renderStrategyTab(cfg, src) {
     const inp = el('input', { type: 'number', step: 'any', value: eff(key) != null ? String(eff(key)) : '' });
     inp.onchange = () => {
       const v = inp.value.trim();
-      setS(key, v === '' ? undefined : parseFloat(v));
+      if (v === '') { inp.value = eff(key) != null ? String(eff(key)) : ''; return; }
+      setS(key, parseFloat(v));
     };
     return FormField({ label, input: unit ? [inp, el('span', { class: 'unit' }, unit)] : inp, hint });
   }
@@ -248,7 +248,8 @@ function renderStrategyTab(cfg, src) {
     const inp = el('input', { type: 'text', value: eff(key) || '', placeholder: placeholder || '' });
     inp.onchange = () => {
       const v = inp.value.trim();
-      setS(key, v === '' ? undefined : v);
+      if (v === '') { inp.value = eff(key) || ''; return; }
+      setS(key, v);
     };
     return FormField({ label, input: inp, hint });
   }
@@ -325,31 +326,13 @@ function renderEntrySection(cfg) {
     onChange: (on) => { cfg.auto_execute = on; },
   });
 
-  const directionRules = el('div', {
-    style: {
-      display: 'grid',
-      gridTemplateColumns: '1fr auto 1fr',
-      gap: '6px 12px',
-      padding: '12px 14px',
-      background: 'var(--surface-1)',
-      border: '1px solid var(--border)',
-      borderRadius: 'var(--r-md)',
-      fontSize: '12px',
-      alignItems: 'center',
-    },
-  },
-    el('span', { class: 'mono', style: { textAlign: 'right' } }, 'CE cumm > PE cumm before crossover'),
-    el('span', { class: 'mono', style: { color: 'var(--text-muted)' } }, '→'),
-    el('span', { class: 'mono bull', style: { fontWeight: 600 } }, 'BUY CE'),
-    el('span', { class: 'mono', style: { textAlign: 'right' } }, 'PE cumm > CE cumm before crossover'),
-    el('span', { class: 'mono', style: { color: 'var(--text-muted)' } }, '→'),
-    el('span', { class: 'mono bear', style: { fontWeight: 600 } }, 'BUY PE'),
-  );
+  const maxPosInput = el('input', { type: 'number', min: '1', max: '50', value: String(cfg.max_positions_per_day) });
+  maxPosInput.onchange = () => {
+    cfg.max_positions_per_day = Math.max(1, parseInt(maxPosInput.value, 10) || 1);
+    maxPosInput.value = String(cfg.max_positions_per_day);
+  };
 
-  const cooldownInput = el('input', { type: 'number', min: '0', max: '120', value: String(cfg.cooldown_minutes) });
-  cooldownInput.onchange = () => { cfg.cooldown_minutes = parseInt(cooldownInput.value, 10) || 0; };
-
-  return section('Entry Conditions', [
+  return section('Global', [
     FormField({
       label: 'Trading Mode',
       input: el('div', { class: 'row gap-8', style: { alignItems: 'center' } }, modeLabel, modeToggle.el),
@@ -361,14 +344,9 @@ function renderEntrySection(cfg) {
       hint: 'When off, signals appear in the Data tab but no orders fire.',
     }),
     FormField({
-      label: 'Entry direction (auto)',
-      input: directionRules,
-      hint: 'Whichever side’s cumulative OI change was lower just before the crossover is the side that gets bought. No configuration — the rule is fixed.',
-    }),
-    FormField({
-      label: 'Cooldown (minutes)',
-      input: [cooldownInput, el('span', { class: 'unit' }, 'min')],
-      hint: 'Global default — each strategy tab can set its own.',
+      label: 'Max positions per day',
+      input: maxPosInput,
+      hint: 'Hard daily cap across ALL strategies and instruments combined.',
     }),
   ]);
 }
