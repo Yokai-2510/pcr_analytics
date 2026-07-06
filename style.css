@@ -538,6 +538,7 @@ select option { background: #14141c; color: var(--text); padding: 8px; }
   padding: 3px;
   gap: 2px;
   backdrop-filter: blur(12px);
+  flex-shrink: 0;
 }
 .segmented .seg {
   padding: 5px 12px;
@@ -761,8 +762,19 @@ table.data tbody tr:hover { background: var(--surface-1); }
   border: 1px solid var(--border);
   border-radius: var(--r-pill);
   overflow-x: auto;
+  overflow-y: hidden;
   max-width: 100%;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
 }
+.tab-strip::-webkit-scrollbar { height: 6px; }
+.tab-strip::-webkit-scrollbar-track { background: transparent; }
+.tab-strip::-webkit-scrollbar-thumb {
+  background: var(--surface-3);
+  border-radius: var(--r-pill);
+}
+.tab-strip::-webkit-scrollbar-thumb:hover { background: var(--border); }
+.tab-strip .tab-item { flex-shrink: 0; }
 .tab-strip .tab-item {
   padding: 6px 12px;
   font-size: 11px;

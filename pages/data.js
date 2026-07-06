@@ -1632,14 +1632,14 @@ export async function mount(container) {
         return;
       }
       const cols = [
-        { key: 'timestamp', label: 'Time', render: r => (r.timestamp || '').slice(11, 19) },
-        { key: 'ce_buy', label: 'CE Buy', num: true, render: r => _fmtLakh(r.ce_buy) },
-        { key: 'ce_sell', label: 'CE Sell', num: true, render: r => _fmtLakh(r.ce_sell) },
-        { key: 'ce_delta', label: 'CE Delta', num: true, render: r => el('span', { class: r.ce_delta >= 0 ? 'bull' : 'bear' }, _fmtLakh(r.ce_delta)) },
-        { key: 'pe_buy', label: 'PE Buy', num: true, render: r => _fmtLakh(r.pe_buy) },
-        { key: 'pe_sell', label: 'PE Sell', num: true, render: r => _fmtLakh(r.pe_sell) },
-        { key: 'pe_delta', label: 'PE Delta', num: true, render: r => el('span', { class: r.pe_delta >= 0 ? 'bull' : 'bear' }, _fmtLakh(r.pe_delta)) },
-        { key: 'net_delta', label: 'Net Delta', num: true, render: r => el('span', { class: r.net_delta >= 0 ? 'bull' : 'bear' }, _fmtLakh(r.net_delta)) },
+        { key: 'timestamp', label: 'Time', render: r => el('td', { class: 'mono' }, (r.timestamp || '').slice(11, 19)) },
+        { key: 'ce_buy', label: 'CE Buy', num: true, render: r => el('td', { class: 'mono' }, _fmtLakh(r.ce_buy)) },
+        { key: 'ce_sell', label: 'CE Sell', num: true, render: r => el('td', { class: 'mono' }, _fmtLakh(r.ce_sell)) },
+        { key: 'ce_delta', label: 'CE Delta', num: true, render: r => el('td', { class: `mono ${r.ce_delta >= 0 ? 'bull' : 'bear'}` }, _fmtLakh(r.ce_delta)) },
+        { key: 'pe_buy', label: 'PE Buy', num: true, render: r => el('td', { class: 'mono' }, _fmtLakh(r.pe_buy)) },
+        { key: 'pe_sell', label: 'PE Sell', num: true, render: r => el('td', { class: 'mono' }, _fmtLakh(r.pe_sell)) },
+        { key: 'pe_delta', label: 'PE Delta', num: true, render: r => el('td', { class: `mono ${r.pe_delta >= 0 ? 'bull' : 'bear'}` }, _fmtLakh(r.pe_delta)) },
+        { key: 'net_delta', label: 'Net Delta', num: true, render: r => el('td', { class: `mono ${r.net_delta >= 0 ? 'bull' : 'bear'}` }, _fmtLakh(r.net_delta)) },
       ];
       optionVolumeContent.appendChild(buildSortableTable(cols, rows.slice().reverse()));
     } catch (e) {

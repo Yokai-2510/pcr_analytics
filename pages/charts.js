@@ -93,8 +93,11 @@ export async function mount(container) {
       toolbar.appendChild(strip);
     }
 
-    toolbar.appendChild(el('div', { class: 'spacer' }));
-    toolbar.appendChild(el('button', { class: 'btn primary sm', onclick: () => openEditor(null) }, icon('plus'), 'New chart'));
+    // In tabs mode the flex:1 strip already fills all free width and scrolls
+    // internally, so a spacer would just steal half of it back and cramp the
+    // tab list. Only workspace mode needs the spacer to push New chart right.
+    if (mode !== 'tabs') toolbar.appendChild(el('div', { class: 'spacer' }));
+    toolbar.appendChild(el('button', { class: 'btn primary sm', style: { flexShrink: '0' }, onclick: () => openEditor(null) }, icon('plus'), 'New chart'));
   }
 
   function switchMode(next) {
