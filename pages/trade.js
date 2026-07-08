@@ -275,6 +275,18 @@ function renderStrategyTab(cfg, src) {
     textField('no_entry_after', 'No entries after', 'HH:MM — this strategy stops opening new positions after this time.', 'e.g. 15:25'),
   ]));
 
+  // ── Conviction filter (Option Volume only) ──
+  // The Entry Signals monitor shows EVERY Net-Delta flip; these thresholds
+  // decide which flips become TRADES, so signals count ≥ optvol trades.
+  if (src === 'optvol') {
+    wrap.appendChild(section(`${SIG_NAMES[src]} — Conviction Filter`, [
+      numField('optvol_min_net_delta', 'Min |Net Delta|',
+        'Only trade when the absolute Net Delta (contracts) is at least this. 0 = trade every flip (noisy). Raises the bar so tiny near-zero flips are skipped.'),
+      numField('optvol_min_net_delta_ratio', 'Min ND ratio',
+        'Require |Net Delta| to be at least this fraction (0–1) of the larger CE/PE delta — filters flips where CE and PE deltas are nearly equal. 0 = off.'),
+    ]));
+  }
+
   // ── Exit conditions ──
   wrap.appendChild(section(`${SIG_NAMES[src]} — Exit Conditions`, [
     boolField('exit_on_counter_crossover', 'Exit on counter-crossover',

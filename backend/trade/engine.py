@@ -795,6 +795,31 @@ def _evaluate_one_entry_source(
     if _entry_already_exists(instrument, source, signal["timestamp"]):
         return  # silent
 
+    # Gate (optvol only): Net-Delta conviction threshold. The websocket engine
+    # emits a transition on EVERY net-delta sign flip (so every flip still shows
+    # in the Entry Signals monitor); this filters out the low-conviction ones so
+    # only a meaningful lead becomes a TRADE. Optional ratio gate too:
+    # |net_delta| must be at least min_net_delta_ratio × the larger CE/PE delta.
+    if source == "optvol":
+        nd = abs(float(signal.get("net_delta") or 0))
+        min_nd = float(config.get("optvol_min_net_delta") or 0)
+        if min_nd > 0 and nd < min_nd:
+            persistence.audit(
+                "gate_reject", instrument=instrument, gate="OPTVOL_MIN_ND",
+                message=f"|ND|={nd:.0f} < min={min_nd:.0f}",
+            )
+            return
+        min_ratio = float(config.get("optvol_min_net_delta_ratio") or 0)
+        if min_ratio > 0:
+            lead = max(abs(float(signal.get("ce_delta") or 0)),
+                       abs(float(signal.get("pe_delta") or 0)))
+            if lead > 0 and nd < min_ratio * lead:
+                persistence.audit(
+                    "gate_reject", instrument=instrument, gate="OPTVOL_MIN_ND_RATIO",
+                    message=f"|ND|={nd:.0f} < {min_ratio:.2f}×lead({lead:.0f})",
+                )
+                return
+
     side = _decide_side(signal.get("signal"))
     if side is None:
         persistence.audit(

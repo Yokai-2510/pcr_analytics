@@ -1667,10 +1667,11 @@ export async function mount(container) {
     // Signals are an ANALYTICS view — generated for ALL four strategies
     // regardless of which are enabled in the trade config. (The config only
     // governs whether a signal becomes a real order.)
-    const [oiRaw, vData, ltpRaw] = await Promise.all([
+    const [oiRaw, vData, ltpRaw, ovRaw] = await Promise.all([
       api.computedTicks(instrument, date).catch(() => []),
       _fetchVolumeData(instrument, date).catch(() => null),
       api.ltpStrength(instrument, date).catch(() => null),
+      api.optionVolume(instrument, date).catch(() => null),
     ]);
     const ticks = filterMarketHours(Array.isArray(oiRaw) ? oiRaw : (oiRaw.ticks || oiRaw.data || oiRaw.rows || []));
     const oiEvents = ticks
@@ -1720,7 +1721,30 @@ export async function mount(container) {
         prevLtp = s;
       }
     }
-    const events = [...oiEvents, ...volEvents, ...vwapEvents, ...ltpEvents];
+    // Option Volume: reconstruct Net-Delta sign-flip transitions from the 1-min
+    // rows (net_delta > 0 -> BUY/CE, < 0 -> SELL/PE), same transition-only
+    // semantics as the other sources. These are ALL flips — the trade engine's
+    // optvol conviction threshold decides which become orders, so the Entry
+    // Signals count is always >= the number of optvol trades.
+    const ovRows = filterMarketHours(Array.isArray(ovRaw?.rows) ? ovRaw.rows : []);
+    const ovEvents = [];
+    let prevOv = null;
+    for (const r of ovRows) {
+      const nd = Number(r.net_delta);
+      if (!Number.isFinite(nd) || nd === 0) continue;
+      const s = nd > 0 ? 'BUY' : 'SELL';
+      if (s !== prevOv) {
+        ovEvents.push({
+          timestamp: r.timestamp,
+          source: 'OptVol',
+          signal: s,
+          metricLabel: 'Net Delta',
+          metricValue: nd,
+        });
+        prevOv = s;
+      }
+    }
+    const events = [...oiEvents, ...volEvents, ...vwapEvents, ...ltpEvents, ...ovEvents];
     events.forEach(e => { e.side = e.signal === 'BUY' ? 'CE' : 'PE'; });
     events.sort((a, b) => String(a.timestamp).localeCompare(String(b.timestamp)));
     return events;
@@ -1766,7 +1790,7 @@ export async function mount(container) {
         entrySignalsContent.innerHTML = '<div class="empty-state">No entry signals for this date.</div>';
         return;
       }
-      const counts = { OI: 0, Volume: 0, VWAP: 0, LTP: 0 };
+      const counts = { OI: 0, Volume: 0, VWAP: 0, LTP: 0, OptVol: 0 };
       events.forEach(e => { if (counts[e.source] != null) counts[e.source] += 1; });
       const latest = events[events.length - 1];
       const stat = (label, value, color) => el('div', { style: { borderLeft: '1px solid var(--border)', paddingLeft: '20px' } },
@@ -1783,6 +1807,7 @@ export async function mount(container) {
         stat('Volume', counts.Volume, '#c6c0ff'),
         stat('VWAP', counts.VWAP, '#7fd1ff'),
         stat('LTP', counts.LTP, '#ffce8a'),
+        stat('Option Vol', counts.OptVol, '#8affc1'),
         el('div', { style: { borderLeft: '1px solid var(--border)', paddingLeft: '20px' } },
           el('span', { class: 'text-xs muted' }, 'Latest'),
           el('div', {}, el('span', { class: `change-pill ${latest.signal === 'BUY' ? 'bull' : 'bear'}`, style: { fontSize: '10px' } }, `${latest.source} · ${crossoverLabel(latest.signal)}`)),
@@ -1790,8 +1815,8 @@ export async function mount(container) {
       );
 
       // Latest at top
-      const SRC_RANK = { OI: 1, Volume: 2, VWAP: 3, LTP: 4 };
-      const SRC_COLOR = { OI: 'var(--accent)', Volume: '#c6c0ff', VWAP: '#7fd1ff', LTP: '#ffce8a' };
+      const SRC_RANK = { OI: 1, Volume: 2, VWAP: 3, LTP: 4, OptVol: 5 };
+      const SRC_COLOR = { OI: 'var(--accent)', Volume: '#c6c0ff', VWAP: '#7fd1ff', LTP: '#ffce8a', OptVol: '#8affc1' };
       const rows = [...events].reverse().map(e => ({
         ...e,
         sourceRank: SRC_RANK[e.source] || 9,

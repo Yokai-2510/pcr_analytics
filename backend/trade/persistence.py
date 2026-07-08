@@ -192,6 +192,11 @@ _DEFAULT_SOURCE_BLOCK: dict[str, Any] = {
     "peak_trail_pct": 80,
     "time_exit_enabled": True,
     "time_exit_at": "15:15",
+    # Option-Volume conviction gate (optvol source only; 0 = off). The websocket
+    # engine still emits every Net-Delta flip to the Entry Signals monitor —
+    # these only decide which flips become TRADES, so signals > trades.
+    "optvol_min_net_delta": 0,        # min |Net Delta| (contracts) to trade
+    "optvol_min_net_delta_ratio": 0,  # min |ND| as a fraction of the larger CE/PE delta (0–1)
 }
 
 DEFAULT_CONFIG: dict[str, Any] = {
