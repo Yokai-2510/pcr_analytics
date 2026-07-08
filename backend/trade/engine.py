@@ -38,7 +38,7 @@ def tick() -> None:
         config = persistence.get_active_config()
         now = utils.now_ist()
         today = utils.today_ist()
-        b = broker_mod.get_broker(config.get("mode", "paper"))
+        b = broker_mod.get_broker(config.get("mode", "paper"), config)
         _evaluate_exits(config, today, now, b)
         _evaluate_entries(config, today, now, b)
     except Exception as exc:  # noqa: BLE001

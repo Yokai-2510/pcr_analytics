@@ -114,6 +114,98 @@ def _get(
     return parsed
 
 
+def _post(
+    path: str,
+    body: dict[str, Any],
+    *,
+    retry_on_401: bool = False,
+) -> dict[str, Any]:
+    url = f"{utils.upstox_base_url()}/{path.lstrip('/')}"
+    headers = {**_headers(), "Content-Type": "application/json"}
+    response = requests.post(url, headers=headers, json=body, timeout=utils.http_timeout())
+    if response.status_code == 401 and retry_on_401:
+        invalidate_token()
+        headers = {**_headers(), "Content-Type": "application/json"}
+        response = requests.post(url, headers=headers, json=body, timeout=utils.http_timeout())
+    parsed: dict[str, Any]
+    try:
+        parsed = response.json()
+    except ValueError:
+        raise BrokerAPIError(
+            f"POST {path} failed: HTTP {response.status_code} {response.text[:500]}",
+            response.status_code,
+        )
+    # Upstox returns 200 on success; order errors come back with status="error"
+    # and an errors[] array — surface the first message verbatim.
+    if response.status_code != 200 or parsed.get("status") == "error":
+        errors = parsed.get("errors") or []
+        detail = errors[0].get("message") if errors and isinstance(errors[0], dict) else parsed
+        raise BrokerAPIError(f"POST {path} failed: {detail}", response.status_code)
+    return parsed
+
+
+def place_order(
+    *,
+    instrument_token: str,
+    quantity: int,
+    transaction_type: str,   # "BUY" | "SELL"
+    order_type: str = "MARKET",
+    product: str = "I",       # I=intraday, D=delivery
+    price: float = 0.0,
+    validity: str = "DAY",
+    tag: str | None = None,
+) -> str:
+    """Place a single order and return its broker order_id.
+
+    Raises BrokerAPIError on any non-success response (rejection at placement,
+    auth failure, etc.) so the caller never mistakes a failed placement for a
+    live order."""
+    body: dict[str, Any] = {
+        "quantity": int(quantity),
+        "product": product,
+        "validity": validity,
+        "price": float(price),
+        "instrument_token": instrument_token,
+        "order_type": order_type,
+        "transaction_type": transaction_type,
+        "disclosed_quantity": 0,
+        "trigger_price": 0,
+        "is_amo": False,
+    }
+    if tag:
+        body["tag"] = str(tag)[:40]
+    parsed = _post("order/place", body, retry_on_401=True)
+    data = parsed.get("data") or {}
+    order_id = data.get("order_id")
+    if not order_id:
+        ids = data.get("order_ids") or []
+        order_id = ids[0] if ids else None
+    if not order_id:
+        raise BrokerAPIError(f"order placed but no order_id in response: {parsed}")
+    return str(order_id)
+
+
+def get_order_details(order_id: str) -> dict[str, Any]:
+    """Fetch a single order's current state (status, average_price, filled_quantity)."""
+    parsed = _get("order/details", {"order_id": order_id}, retry_on_401=True)
+    data = parsed.get("data") or {}
+    if not isinstance(data, dict):
+        raise BrokerAPIError("order details response data is not an object")
+    return data
+
+
+def cancel_order(order_id: str) -> None:
+    """Best-effort cancel of an open order (used when a fill poll times out)."""
+    url = f"{utils.upstox_base_url()}/order/cancel"
+    try:
+        requests.delete(
+            url, headers=_headers(), params={"order_id": order_id},
+            timeout=utils.http_timeout(),
+        )
+    except Exception as exc:  # never let a cancel failure mask the real error
+        logger.warning("cancel_order %s failed: %s", order_id, exc)
+
+
 def get_exchange_status(exchange: str = "NSE") -> dict[str, Any]:
     parsed = _get(f"market/status/{exchange}", retry_on_401=True)
     data = parsed.get("data") or {}

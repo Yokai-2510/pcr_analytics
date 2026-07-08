@@ -17,9 +17,12 @@ Replaces the REST option-chain polling as the PRIMARY market-data source:
   * Option Volume strategy state: every tick classifies the traded volume
     delta by the quote rule (ltp >= ask -> buyer-initiated, ltp <= bid ->
     seller-initiated, else midpoint) into per-instrument CE/PE buy & sell
-    accumulators over the ATM band. Signals (which side's DELTA leads) are
-    TRANSITION-based and recorded live per tick; the 1-minute logger writes
-    the rank-momentum-style table to `option_volume_logs`.
+    accumulators over the ATM band. Buckets hold RAW CONTRACT VOLUME (the
+    per-tick increment in traded quantity), not premium notional, so they
+    are directly comparable to the Volume Logs tab. Signals (which side's
+    DELTA leads) are TRANSITION-based and recorded live per tick; the
+    1-minute logger writes the rank-momentum-style table to
+    `option_volume_logs`.
 
 Trade signals are generated live per tick; persistence logging is 1-minute.
 """
@@ -233,6 +236,9 @@ class WsEngine:
                 leg.delta = utils.safe_float(gk.get("delta"), leg.delta)
             leg.ts = now
             # Aggressor-classified volume delta (quote rule) — LIVE, per tick.
+            # dv is the raw traded-quantity increment; we accumulate CONTRACTS
+            # (not dv*ltp premium notional) so the buckets are true buy/sell
+            # volume, comparable to the Volume Logs tab.
             dv = leg.volume - prev_vol
             if dv > 0:
                 ov = self.optvol.get(leg.instrument)
@@ -245,7 +251,7 @@ class WsEngine:
                         mid = (leg.bid + leg.ask) / 2 if (leg.bid and leg.ask) else leg.ltp
                         buyer = leg.ltp >= mid
                     fld = f"{leg.side.lower()}_{'buy' if buyer else 'sell'}"
-                    ov[fld] = ov.get(fld, 0.0) + dv * leg.ltp
+                    ov[fld] = ov.get(fld, 0.0) + dv
                     self._check_transition(leg.instrument, ov)
 
     def _in_band(self, leg: _Leg) -> bool:

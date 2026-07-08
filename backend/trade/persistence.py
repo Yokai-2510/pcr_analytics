@@ -197,6 +197,12 @@ _DEFAULT_SOURCE_BLOCK: dict[str, Any] = {
 DEFAULT_CONFIG: dict[str, Any] = {
     "mode": "paper",
     "auto_execute": False,
+    # Live order placement (used only when mode == "live").
+    "order_type": "MARKET",          # MARKET | LIMIT (LIMIT uses the signal LTP)
+    "order_product": "I",            # I=intraday, D=delivery
+    "order_validity": "DAY",         # DAY | IOC
+    "fill_timeout_seconds": 8,       # cancel an order that hasn't filled by then
+    "fill_poll_interval_seconds": 0.3,
     "signal_mode": "oi_only",   # "oi_only" | "volume_only" | "vwap_only" | "both" (independent)
     "cooldown_minutes": 0,
     "instruments": ["nifty"],
