@@ -43,6 +43,7 @@ docs/                this documentation
 
 | doc | covers |
 |-----|--------|
+| [docs/STRATEGIES.md](docs/STRATEGIES.md) | **plain-English guide to all 5 strategies** — what each one watches, when it buys, when it exits |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | processes, data flow, DB tables, instruments |
 | [docs/TRADE_ENGINE.md](docs/TRADE_ENGINE.md) | signals, entry gates, exit rules, **live order placement** |
 | [docs/OPTION_VOLUME.md](docs/OPTION_VOLUME.md) | aggressor classification + ND/DV/DA/FR metrics |
