@@ -398,11 +398,10 @@ def _ltp_signal(
         ts = latest["ts"] if latest else None
         if not ts:
             return None
-        first_ts = conn.execute(
-            "SELECT MIN(timestamp) AS ts FROM oi_snapshots WHERE instrument=? "
-            "AND substr(timestamp,1,10)=? AND substr(timestamp,12,5)>='09:15'",
-            (instrument, date),
-        ).fetchone()["ts"]
+        # NOTE: there is deliberately no single "first tick of the day" reference
+        # here. The session baseline is resolved PER STRIKE inside strict_at() —
+        # see first_refs(). Reading every strike out of one 09:15 snapshot breaks
+        # on trending days (stale deep-ITM opening prints).
 
         def strict_at(t: str | None):
             """(signal, metrics) for tick t — strict STEP 12/13 decision."""
@@ -433,8 +432,38 @@ def _ltp_signal(
                     ).fetchall()
                 }
 
+            def first_refs(col: str) -> dict[float, float]:
+                # Session reference for ONE side, per strike: the first tick at/after
+                # 09:15 in which that strike actually PRINTED a price.
+                #
+                # This must not read every strike out of the single 09:15 snapshot.
+                # When the index trends, the ATM drifts several steps, so the strikes
+                # we care about now were deep ITM at the open — and deep-ITM options
+                # barely trade, so their 09:15 print is a stale quote. Measured against
+                # that, the session change comes out nonsensical (puts "gaining" while
+                # the index rallies), which parks the strategy in "IV Expansion / Wait"
+                # for the whole day. Matches data_processor._ltp_build exactly.
+                rows = conn.execute(
+                    f"SELECT o.strike AS strike, o.{col} AS v FROM oi_snapshots o "
+                    f"JOIN (SELECT strike, MIN(timestamp) AS ts FROM oi_snapshots "
+                    f"      WHERE instrument=? AND substr(timestamp,1,10)=? "
+                    f"        AND substr(timestamp,12,5)>='09:15' "
+                    f"        AND substr(timestamp,12,5)<='15:30' "
+                    f"        AND {col} IS NOT NULL AND strike IN ({ph}) "
+                    f"      GROUP BY strike) f "
+                    f"  ON f.strike=o.strike AND f.ts=o.timestamp "
+                    f"WHERE o.instrument=? AND substr(o.timestamp,1,10)=?",
+                    (instrument, date, *strikes, instrument, date),
+                ).fetchall()
+                return {
+                    r["strike"]: v
+                    for r in rows
+                    if (v := utils.safe_float(r["v"], None)) is not None
+                }
+
             cur = fetch(t)
-            ref = fetch(first_ts)
+            ref_ce = first_refs("ce_ltp")
+            ref_pe = first_refs("pe_ltp")
             try:
                 t5 = (datetime.fromisoformat(t) - timedelta(minutes=5)).strftime("%H:%M:%S")
             except ValueError:
@@ -454,9 +483,10 @@ def _ltp_signal(
                 return utils.safe_float(r[col], None) if r else None
 
             def sess(sl, col):
+                ref_map = ref_ce if col == "ce_ltp" else ref_pe
                 tot = 0.0
                 for s in sl:
-                    c, rf = _ltp(cur, s, col), _ltp(ref, s, col)
+                    c, rf = _ltp(cur, s, col), ref_map.get(s)
                     if c is not None and rf is not None:
                         tot += c - rf
                 return tot
