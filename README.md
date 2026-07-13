@@ -43,7 +43,8 @@ docs/                this documentation
 
 | doc | covers |
 |-----|--------|
-| [docs/STRATEGIES.md](docs/STRATEGIES.md) | **plain-English guide to all 5 strategies** — what each one watches, when it buys, when it exits |
+| [docs/STRATEGIES.md](docs/STRATEGIES.md) | **strategy index** — shared entry/exit rules, instrument selection, execution settings |
+| [docs/strategies/](docs/strategies/) | one spec sheet per strategy: [OI](docs/strategies/OI.md) · [Volume](docs/strategies/VOLUME.md) · [VWAP](docs/strategies/VWAP.md) · [LTP](docs/strategies/LTP.md) · [Option Volume](docs/strategies/OPTION_VOLUME.md) |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | processes, data flow, DB tables, instruments |
 | [docs/TRADE_ENGINE.md](docs/TRADE_ENGINE.md) | signals, entry gates, exit rules, **live order placement** |
 | [docs/OPTION_VOLUME.md](docs/OPTION_VOLUME.md) | aggressor classification + ND/DV/DA/FR metrics |
