@@ -106,11 +106,49 @@ def _evaluate_one_exit(
 
     # Track the peak LTP since entry (= highest profit reached) every tick,
     # independent of the trailing-SL config — drives the Max Profit column.
+    # The peak's TIMESTAMP is recorded too: without it a review can see how
+    # much was given back but not when the trade turned.
     prev_hwm = position.get("high_watermark")
     hwm = ltp if (prev_hwm is None or ltp > float(prev_hwm)) else float(prev_hwm)
     if prev_hwm is None or ltp > float(prev_hwm):
-        persistence.update_position_high_watermark(int(position["id"]), ltp)
-        position["high_watermark"] = ltp
+        hwm = ltp
+        peak_profit = (hwm - entry_price) * qty
+        peak_at = utils.iso_now()
+        persistence.update_position_peak(int(position["id"]), hwm,
+                                         peak_profit, peak_at)
+        position["high_watermark"] = hwm
+        position["peak_profit"] = peak_profit
+        position["peak_profit_at"] = peak_at
+
+    cur_profit  = (ltp - entry_price) * qty
+    peak_profit = float(position.get("peak_profit") or max((hwm - entry_price) * qty, 0.0))
+
+    # Priority 1a: break-even. Once profit reaches the trigger %, the stop is
+    # raised to entry so the trade can no longer lose. Latched — never re-armed.
+    be_trigger = float(config.get("breakeven_trigger_pct") or 0)
+    if (be_trigger > 0 and not int(position.get("breakeven_armed") or 0)
+            and entry_price > 0
+            and (ltp - entry_price) / entry_price * 100.0 >= be_trigger):
+        persistence.arm_breakeven(int(position["id"]), entry_price)
+        position["sl_price"] = entry_price
+        position["breakeven_armed"] = 1
+        persistence.audit("breakeven_armed", instrument=instrument,
+                          position_id=int(position["id"]),
+                          message="sl -> entry %.2f at +%.1f%%" % (
+                              entry_price, (ltp - entry_price) / entry_price * 100.0))
+
+    # Priority 1b-dynamic: PROFIT-drawdown trailing stop. Trails the peak
+    # PROFIT rather than the peak price, so it always retains a defined
+    # fraction of the gain: exit when
+    #     current_profit <= peak_profit * (1 - drawdown%)
+    # e.g. peak profit 6970 with 20% => exit at 5576 (keeps 80%). The
+    # price-based peak_trail below would give back materially more on a large
+    # winner because it ignores the entry price.
+    if config.get("dynamic_tsl_enabled") and peak_profit > 0:
+        dd = float(config.get("dynamic_tsl_drawdown_pct") or 0)
+        if dd > 0 and cur_profit <= peak_profit * (1.0 - dd / 100.0):
+            _close(position, "exit_dynamic_tsl", ltp, b)
+            return
 
     # Priority 1b: peak trailing exit. Once in profit (peak above entry), exit if
     # the premium retraces below peak_trail_pct% of its peak — books profit before

@@ -299,7 +299,12 @@ function renderStrategyTab(cfg, src) {
     numField('trailing_sl_trigger_pct', 'TSL trigger %', 'Arm the trailing stop once this profit % is reached.', '%'),
     numField('trailing_sl_step_pct', 'TSL step %', 'Trail this % below the peak once armed.', '%'),
     boolField('peak_trail_enabled', 'Peak trail'),
-    numField('peak_trail_pct', 'Peak trail %', 'Once in profit, exit if the premium retraces below this % of its peak.', '%'),
+    numField('peak_trail_pct', 'Peak trail %', 'Once in profit, exit if the premium retraces below this % of its peak. PRICE-based — on a big winner it gives back more of the gain than the profit-based Dynamic TSL below.', '%'),
+    boolField('dynamic_tsl_enabled', 'Dynamic TSL (profit drawdown)'),
+    numField('dynamic_tsl_drawdown_pct', 'TSL drawdown %',
+      'Trails the PEAK PROFIT, not the peak price: exit when profit falls this % below its highest point, so a fixed share of the gain is always kept. e.g. peak profit ₹6,970 at 20% exits at ₹5,576 (keeps 80%).', '%'),
+    numField('breakeven_trigger_pct', 'Break-even trigger %',
+      'Once profit reaches this %, the stop is moved up to the entry price so the trade can no longer lose. 0 disables.', '%'),
     boolField('time_exit_enabled', 'Time exit'),
     textField('time_exit_at', 'Time exit at', 'HH:MM — force-close this strategy\'s open positions at this time.', 'e.g. 15:15'),
   ]));
@@ -720,8 +725,8 @@ function paintSummary(card, summary, cfg, tab) {
 function paintPositions(card, positions, tab) {
   card.innerHTML = '';
   const cols = tab === 'open'
-    ? ['Time', 'Instrument', 'Strategy', 'Strike', 'Type', 'Qty', 'Entry ₹', 'LTP ₹', 'P&L', 'Max ₹', 'SL', 'Target', '']
-    : ['Entered', 'Exited', 'Instrument', 'Strategy', 'Strike', 'Type', 'Qty', 'Entry ₹', 'Exit ₹', 'P&L', 'Max ₹', 'Reason'];
+    ? ['', 'Time', 'Instrument', 'Strategy', 'Strike', 'Type', 'Qty', 'Entry ₹', 'LTP ₹', 'P&L', 'Max ₹', 'Peak at', 'SL', 'Target', '']
+    : ['', 'Entered', 'Exited', 'Instrument', 'Strategy', 'Strike', 'Type', 'Qty', 'Entry ₹', 'Exit ₹', 'P&L', 'Max ₹', 'Peak at', 'Kept', 'Reason'];
 
   const table = el('table', { class: 'data-table', style: { width: '100%' } });
   table.appendChild(el('thead', {},
@@ -762,14 +767,95 @@ function _srcLabel(s) {
 // Highest profit reached = (peak LTP since entry − entry) × qty. The engine
 // tracks high_watermark (peak LTP) every tick.
 function _maxProfit(p) {
+  // The engine now stores peak_profit directly; fall back to deriving it from
+  // the peak LTP for positions opened before that column existed.
+  if (p.peak_profit != null) return Number(p.peak_profit);
   if (p.high_watermark == null || p.entry_price == null) return null;
   return (Number(p.high_watermark) - Number(p.entry_price)) * (p.qty || 0);
+}
+
+// How much of the peak profit actually survived to the exit. This is the
+// number that tells you whether the trailing config is doing its job.
+function _capturePct(p) {
+  const mp = _maxProfit(p);
+  const realised = p.pnl != null ? Number(p.pnl) : null;
+  if (mp == null || realised == null || mp <= 0) return null;
+  return (realised / mp) * 100;
+}
+
+// Detail row shown when a trade is expanded (mirrors the rank-momentum panel).
+function _detailRow(p, colspan) {
+  const mp = _maxProfit(p);
+  const cap = _capturePct(p);
+  const kv = (label, value, cls) => el('div', {
+    style: { display: 'flex', justifyContent: 'space-between', gap: '12px',
+             padding: '3px 0', borderBottom: '1px solid var(--border)' },
+  },
+    el('span', { class: 'text-xs dim', style: { whiteSpace: 'nowrap' } }, label),
+    el('span', { class: 'text-xs mono ' + (cls || ''), style: { fontWeight: 600, textAlign: 'right' } }, value),
+  );
+  const sec = (title, rows) => el('div', { style: { marginBottom: '10px' } },
+    el('div', { class: 'text-xs dim', style: { fontWeight: 700, letterSpacing: '0.08em',
+        textTransform: 'uppercase', marginBottom: '4px' } }, title),
+    el('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: '0 24px' } }, ...rows),
+  );
+
+  const peakRows = [
+    kv('Peak profit', mp != null ? fmtPnL(mp) : '—', mp != null && mp > 0 ? 'bull' : ''),
+    kv('Peak at', p.peak_profit_at ? fmtTime(p.peak_profit_at) : '—'),
+    kv('Peak premium', p.high_watermark != null ? fmtRupee(p.high_watermark) : '—'),
+  ];
+  if (cap != null) {
+    peakRows.push(kv('Captured', cap.toFixed(0) + '% of peak', cap >= 70 ? 'bull' : cap >= 40 ? '' : 'bear'));
+    if (mp != null && p.pnl != null) peakRows.push(kv('Given back', fmtPnL(Number(p.pnl) - mp), 'bear'));
+  }
+
+  return el('tr', { class: 'detail-row' },
+    el('td', { colspan: colspan, style: { padding: '10px 16px', background: 'var(--bg-muted, rgba(255,255,255,0.03))' } },
+      sec('Peak & capture', peakRows),
+      sec('Trade', [
+        kv('Entry', fmtRupee(p.entry_price) + (p.entry_time ? '  @ ' + fmtTime(p.entry_time) : '')),
+        kv('Exit', p.exit_price != null ? fmtRupee(p.exit_price) + (p.exit_time ? '  @ ' + fmtTime(p.exit_time) : '') : '— (open)'),
+        kv('Qty', String(p.qty ?? '—')),
+        kv('P&L', p.pnl != null ? fmtPnL(p.pnl) : '—', p.pnl != null && p.pnl >= 0 ? 'bull' : 'bear'),
+      ]),
+      sec('Risk & routing', [
+        kv('Stop loss', p.sl_price != null ? fmtRupee(p.sl_price) + (Number(p.breakeven_armed) ? '  (break-even)' : '') : '—'),
+        kv('Target', p.target_price != null ? fmtRupee(p.target_price) : '—'),
+        kv('Strategy', _srcLabel(p.source)),
+        kv('Exit reason', p.exit_reason ? formatExitReason(p.exit_reason) : '—'),
+        kv('Mode', String(p.mode || '—')),
+        kv('Position id', String(p.id ?? '—')),
+      ]),
+    ),
+  );
+}
+
+// Expander cell — click the arrow to reveal _detailRow beneath the trade.
+function _expanderCell(p, colspan) {
+  const btn = el('button', { class: 'btn ghost sm', style: { padding: '2px 6px', lineHeight: 1 } }, '▶');
+  let open = false, detail = null;
+  btn.onclick = (ev) => {
+    const tr = ev.target.closest('tr');
+    if (!tr) return;
+    open = !open;
+    btn.textContent = open ? '▼' : '▶';
+    if (open) {
+      detail = _detailRow(p, colspan);
+      tr.parentNode.insertBefore(detail, tr.nextSibling);
+    } else if (detail) {
+      detail.remove();
+      detail = null;
+    }
+  };
+  return el('td', { style: { padding: '6px 4px', width: '28px' } }, btn);
 }
 
 function openRow(p) {
   const ltp = p.live_ltp;
   const pnl = p.unrealized_pnl;
   return el('tr', { class: 'data-row' },
+    _expanderCell(p, 15),
     cell(fmtTime(p.entry_time)),
     cell(p.instrument),
     cell(_srcLabel(p.source)),
@@ -780,7 +866,8 @@ function openRow(p) {
     cell(ltp != null ? fmtRupee(ltp) : '—'),
     cell(pnl != null ? fmtPnL(pnl) : '—', pnl != null ? (pnl >= 0 ? 'bull' : 'bear') : ''),
     (() => { const mp = _maxProfit(p); return cell(mp != null ? fmtPnL(mp) : '—', mp != null && mp > 0 ? 'bull' : ''); })(),
-    cell(p.sl_price != null ? fmtRupee(p.sl_price) : '—'),
+    cell(p.peak_profit_at ? fmtTime(p.peak_profit_at) : '—'),
+    cell(p.sl_price != null ? fmtRupee(p.sl_price) + (Number(p.breakeven_armed) ? ' ⇧' : '') : '—'),
     cell(p.target_price != null ? fmtRupee(p.target_price) : '—'),
     el('td', { style: { padding: '6px 10px', textAlign: 'right' } },
       el('button', {
@@ -801,6 +888,7 @@ function openRow(p) {
 
 function closedRow(p) {
   return el('tr', { class: 'data-row' },
+    _expanderCell(p, 15),
     cell(fmtTime(p.entry_time)),
     cell(fmtTime(p.exit_time)),
     cell(p.instrument),
@@ -812,6 +900,11 @@ function closedRow(p) {
     cell(fmtRupee(p.exit_price)),
     cell(fmtPnL(p.pnl), p.pnl != null && p.pnl >= 0 ? 'bull' : 'bear'),
     (() => { const mp = _maxProfit(p); return cell(mp != null ? fmtPnL(mp) : '—', mp != null && mp > 0 ? 'bull' : ''); })(),
+    cell(p.peak_profit_at ? fmtTime(p.peak_profit_at) : '—'),
+    (() => {
+      const c = _capturePct(p);
+      return cell(c != null ? c.toFixed(0) + '%' : '—', c == null ? '' : c >= 70 ? 'bull' : c >= 40 ? '' : 'bear');
+    })(),
     cell(formatExitReason(p.exit_reason)),
   );
 }
@@ -992,8 +1085,17 @@ function fmtPnL(v) {
   return sign + n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
+const EXIT_REASON_LABELS = {
+  exit_dynamic_tsl: 'Dynamic TSL',
+  exit_trail: 'Peak Trail',
+  exit_sl: 'Stop Loss',
+  exit_eod: 'EOD',
+  exit_crossover: 'Counter-Crossover',
+};
+
 function formatExitReason(reason) {
   if (!reason) return '—';
+  if (EXIT_REASON_LABELS[reason]) return EXIT_REASON_LABELS[reason];
   return String(reason)
     .replace(/^exit_/, '')
     .replace(/_/g, ' ')

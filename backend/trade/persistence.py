@@ -80,6 +80,9 @@ _SCHEMA = [
         exit_time TEXT,
         status TEXT NOT NULL,
         high_watermark REAL,
+        peak_profit REAL,
+        peak_profit_at TEXT,
+        breakeven_armed INTEGER NOT NULL DEFAULT 0,
         sl_price REAL,
         target_price REAL,
         exit_reason TEXT,
@@ -139,6 +142,15 @@ def _migrate_source_columns(conn: sqlite3.Connection) -> None:
     pcols = {r[1] for r in conn.execute("PRAGMA table_info(positions)").fetchall()}
     if "source" not in pcols:
         conn.execute("ALTER TABLE positions ADD COLUMN source TEXT NOT NULL DEFAULT 'oi'")
+    for _ddl in (
+        "ALTER TABLE positions ADD COLUMN peak_profit REAL",
+        "ALTER TABLE positions ADD COLUMN peak_profit_at TEXT",
+        "ALTER TABLE positions ADD COLUMN breakeven_armed INTEGER NOT NULL DEFAULT 0",
+    ):
+        try:
+            conn.execute(_ddl)
+        except Exception:
+            pass   # column already present
 
     ocols = {r[1] for r in conn.execute("PRAGMA table_info(orders)").fetchall()}
     if "source" not in ocols:
@@ -190,6 +202,17 @@ _DEFAULT_SOURCE_BLOCK: dict[str, Any] = {
     "target_pct": 50,
     "peak_trail_enabled": False,
     "peak_trail_pct": 80,
+    # Dynamic TSL trails the PEAK PROFIT, not the peak price: exit when
+    # current profit <= peak_profit * (1 - dynamic_tsl_drawdown_pct/100).
+    # Unlike peak_trail (price-based) this retains a defined FRACTION OF THE
+    # PROFIT regardless of entry price - e.g. entry 100, peak 200, 20%:
+    # price-trail exits at 160 (keeps 60% of the gain), profit-trail exits at
+    # 180 (keeps 80%). Ships disabled so behaviour only changes when asked.
+    "dynamic_tsl_enabled": False,
+    "dynamic_tsl_drawdown_pct": 20,
+    # Once profit reaches this %, the stop is raised to entry (risk removed).
+    # 0 disables.
+    "breakeven_trigger_pct": 0,
     "time_exit_enabled": True,
     "time_exit_at": "15:15",
     # Option-Volume conviction gate (optvol source only; 0 = off). The websocket
@@ -224,6 +247,17 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "target_pct": 50,
     "peak_trail_enabled": False,
     "peak_trail_pct": 80,   # once in profit, exit if premium falls below this % of its peak
+    # Dynamic TSL trails the PEAK PROFIT, not the peak price: exit when
+    # current profit <= peak_profit * (1 - dynamic_tsl_drawdown_pct/100).
+    # Unlike peak_trail (price-based) this retains a defined FRACTION OF THE
+    # PROFIT regardless of entry price - e.g. entry 100, peak 200, 20%:
+    # price-trail exits at 160 (keeps 60% of the gain), profit-trail exits at
+    # 180 (keeps 80%). Ships disabled so behaviour only changes when asked.
+    "dynamic_tsl_enabled": False,
+    "dynamic_tsl_drawdown_pct": 20,
+    # Once profit reaches this %, the stop is raised to entry (risk removed).
+    # 0 disables.
+    "breakeven_trigger_pct": 0,
     "time_exit_enabled": True,
     "time_exit_at": "15:15",
     "no_entry_after": "15:25",   # stop opening NEW positions this late (intraday
@@ -243,6 +277,7 @@ PER_SOURCE_KEYS = (
     "exit_on_counter_crossover", "stop_loss_enabled", "stop_loss_pct",
     "trailing_sl_enabled", "trailing_sl_trigger_pct", "trailing_sl_step_pct",
     "target_enabled", "target_pct", "peak_trail_enabled", "peak_trail_pct",
+    "dynamic_tsl_enabled", "dynamic_tsl_drawdown_pct", "breakeven_trigger_pct",
     "time_exit_enabled", "time_exit_at", "no_entry_after",
 )
 
@@ -373,6 +408,11 @@ def insert_position(conn: sqlite3.Connection, fields: dict[str, Any]) -> int:
     columns = [
         "instrument", "instrument_token", "strike", "option_type",
         "qty", "lots", "entry_order_id", "entry_price", "entry_time",
+        # peak_profit / peak_profit_at / breakeven_armed are deliberately NOT
+        # inserted here: they are nullable-or-defaulted in the DDL and written
+        # by the engine as the trade runs. Listing them would pass an explicit
+        # None for breakeven_armed, which is NOT NULL DEFAULT 0 — that would
+        # fail every insert. Reads use SELECT *, so they surface regardless.
         "status", "high_watermark", "sl_price", "target_price",
         "mode", "signal_timestamp", "source",
         "ctx_oi_difference", "ctx_pcr", "ctx_ce_cumm", "ctx_pe_cumm", "ctx_margin",
@@ -497,6 +537,31 @@ def update_position_high_watermark(position_id: int, high_watermark: float) -> N
         conn.execute(
             "UPDATE positions SET high_watermark = ? WHERE id = ? AND status = 'open'",
             (high_watermark, position_id),
+        )
+        conn.commit()
+
+
+def update_position_peak(position_id: int, high_watermark: float,
+                         peak_profit: float, peak_profit_at: str) -> None:
+    """Record a new peak: peak LTP, the rupee profit at that peak, and WHEN it
+    happened. The timestamp is what makes the peak reviewable after the fact -
+    without it you can see how much you gave back but not when it turned."""
+    with closing(data_processor.connect()) as conn:
+        conn.execute(
+            "UPDATE positions SET high_watermark = ?, peak_profit = ?, "
+            "peak_profit_at = ? WHERE id = ? AND status = 'open'",
+            (high_watermark, peak_profit, peak_profit_at, position_id),
+        )
+        conn.commit()
+
+
+def arm_breakeven(position_id: int, sl_price: float) -> None:
+    """Raise the stop to break-even and latch it so it never re-arms."""
+    with closing(data_processor.connect()) as conn:
+        conn.execute(
+            "UPDATE positions SET sl_price = ?, breakeven_armed = 1 "
+            "WHERE id = ? AND status = 'open'",
+            (sl_price, position_id),
         )
         conn.commit()
 
