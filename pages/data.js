@@ -506,9 +506,13 @@ export async function mount(container) {
         const absCe = Math.abs(cΔ), absPe = Math.abs(pΔ);
         if (prevRow && absCe > 0) {
           const pcrMag = absPe / absCe;
-          const sign = ((pΔ >= 0 && cΔ >= 0) || (pΔ <= 0 && cΔ <= 0))
-            ? (pcrMag > 1 ? 1 : -1)
-            : (pΔ >= 0 ? 1 : -1);
+          // Direction is sign(ΔPE − ΔCE) in every sign combination, which is
+          // exactly the Difference. The previous rule (bigger side wins when
+          // signs match) was correct while both sides BUILT but inverted when
+          // both UNWOUND: calls unwinding faster is bullish (writers covering),
+          // yet |ΔPE|/|ΔCE| < 1 scored it Bear. Deriving the sign from the
+          // difference handles building, unwinding and mixed identically.
+          const sign = (pΔ - cΔ) >= 0 ? 1 : -1;
           signedPcr = sign * pcrMag;
           signal = signedPcr > 0
             ? (signedPcr >= 1 ? 'Strong Bull' : 'Bull')
@@ -1524,19 +1528,45 @@ export async function mount(container) {
       oiChangeLogsContent.appendChild(summaryStrip);
 
       // Pre-compute display values so sorting is just (re)arranging an array.
-      const computed = rows.map(r => {
+      const computed = rows.map((r, i) => {
         const ceCumm = r.ce_oi_cumm_change ?? r.ce_cumulative ?? r.ce_oi_cumm ?? 0;
         const peCumm = r.pe_oi_cumm_change ?? r.pe_cumulative ?? r.pe_oi_cumm ?? 0;
         const crossover = r.crossover === true || r.crossover === 1 || r.crossover === 'TRUE' || r.crossover === 'true';
         const signal = (r.signal || '').toUpperCase();
+        // TRUE interval change = this tick's OI minus the PREVIOUS tick's, so
+        // the column matches its label. The backend's ce_oi_change/pe_oi_change
+        // are measured from the post-settlement BASELINE, not from the prior
+        // tick, which is why they read positive ~97% of the time — OI mostly
+        // builds across a session, so a baseline delta almost never goes
+        // negative and unwinding was invisible. Both cumulative figures share
+        // the same first-tick baseline, so their difference is exactly the
+        // interval change. rows is reverse-chronological, so the previous tick
+        // is the NEXT element; the oldest row has no predecessor and falls back
+        // to the backend value.
+        const prevRowOi = rows[i + 1];
+        const prevCeCumm = prevRowOi ? (prevRowOi.ce_oi_cumm_change ?? prevRowOi.ce_cumulative ?? prevRowOi.ce_oi_cumm ?? null) : null;
+        const prevPeCumm = prevRowOi ? (prevRowOi.pe_oi_cumm_change ?? prevRowOi.pe_cumulative ?? prevRowOi.pe_oi_cumm ?? null) : null;
         return {
           timestamp: r.timestamp,
-          ceChg: r.ce_oi_change ?? r.ce_oi_chg ?? 0,
-          peChg: r.pe_oi_change ?? r.pe_oi_chg ?? 0,
+          ceChg: prevCeCumm == null ? (r.ce_oi_change ?? r.ce_oi_chg ?? 0) : ceCumm - prevCeCumm,
+          peChg: prevPeCumm == null ? (r.pe_oi_change ?? r.pe_oi_chg ?? 0) : peCumm - prevPeCumm,
           ceCumm,
           peCumm,
           diff: peCumm - ceCumm,
-          oiPcr: ceCumm !== 0 ? peCumm / ceCumm : null,   // OI PCR = cum ΔPE OI / cum ΔCE OI
+          // OI PCR is a ratio of SIGNED cumulative changes, so it only carries
+          // put-call meaning while BOTH sides are adding OI. With either side
+          // unwinding it is at best meaningless and at worst inverted:
+          //   BANKNIFTY 13:26 — ceCumm -75.13L, peCumm -78.75L
+          //   ratio = (-78.75)/(-75.13) = 1.05  -> rendered GREEN "bullish"
+          //   difference = -3.61L (puts unwinding faster) -> RED "bearish"
+          // Same data, opposite conclusions, and the difference is the correct
+          // read (it is also what the trade engine actually signals on).
+          // Across stored history 31% of ticks have both sides negative and a
+          // further 12% have mixed signs — 43% of all OI PCR values were
+          // therefore unusable. Compute it only when both sides are building.
+          oiPcr: (ceCumm > 0 && peCumm > 0) ? peCumm / ceCumm : null,
+          oiPcrState: (ceCumm > 0 && peCumm > 0) ? 'valid'
+                    : (ceCumm < 0 && peCumm < 0) ? 'unwinding' : 'mixed',
           signal,
           signalRank: signal === 'BUY' ? 1 : signal === 'SELL' ? -1 : 0,
           crossover: crossover ? 1 : 0,
@@ -1545,19 +1575,31 @@ export async function mount(container) {
 
       const cols = [
         { key: 'timestamp', label: 'Timestamp', render: r => el('td', { class: 'mono' }, fmtTimeIST(r.timestamp)) },
-        // OI change / cumulative columns are shown as positive magnitudes:
-        // cumulative OI only ever grows, so a "-" here just confused traders.
-        // The signed values are kept in the row objects (used by Difference,
-        // OI PCR, sorting and the signal/crossover logic) — only the rendered
-        // text is absolute.
-        { key: 'ceChg', label: 'CE OI Change', render: r => el('td', { class: 'mono' }, fmtCompact(Math.abs(r.ceChg))) },
-        { key: 'peChg', label: 'PE OI Change', render: r => el('td', { class: 'mono' }, fmtCompact(Math.abs(r.peChg))) },
-        { key: 'ceCumm', label: 'CE Cumulative', render: r => el('td', { class: 'mono' }, fmtCompact(Math.abs(r.ceCumm))) },
-        { key: 'peCumm', label: 'PE Cumulative', render: r => el('td', { class: 'mono' }, fmtCompact(Math.abs(r.peCumm))) },
+        // OI changes are SIGNED and must render signed: a negative value is
+        // unwinding (positions being closed), a positive value is fresh
+        // writing. These are opposite events and Math.abs() made them
+        // indistinguishable — every row read as "building" even while the
+        // whole chain was unwinding, which is also why Difference could look
+        // wrong next to them (Difference always used the true signed values).
+        { key: 'ceChg', label: 'CE OI Change', render: r => el('td', { class: `mono ${r.ceChg >= 0 ? 'bull' : 'bear'}` }, (r.ceChg > 0 ? '+' : '') + fmtCompact(r.ceChg)) },
+        { key: 'peChg', label: 'PE OI Change', render: r => el('td', { class: `mono ${r.peChg >= 0 ? 'bull' : 'bear'}` }, (r.peChg > 0 ? '+' : '') + fmtCompact(r.peChg)) },
+        { key: 'ceCumm', label: 'CE Cumulative', render: r => el('td', { class: `mono ${r.ceCumm >= 0 ? 'bull' : 'bear'}` }, (r.ceCumm > 0 ? '+' : '') + fmtCompact(r.ceCumm)) },
+        { key: 'peCumm', label: 'PE Cumulative', render: r => el('td', { class: `mono ${r.peCumm >= 0 ? 'bull' : 'bear'}` }, (r.peCumm > 0 ? '+' : '') + fmtCompact(r.peCumm)) },
         { key: 'diff', label: 'Difference (PE−CE)', render: r => el('td', { class: `mono ${r.diff >= 0 ? 'bull' : 'bear'}`, style: { fontWeight: '600' } }, (r.diff >= 0 ? '+' : '') + fmtCompact(r.diff)) },
         { key: 'oiPcr', label: 'OI PCR', render: r => {
-          if (r.oiPcr == null) return el('td', { class: 'mono dim' }, '—');
-          return el('td', { class: `mono ${r.oiPcr >= 1 ? 'bull' : 'bear'}`, style: { fontWeight: '600' } }, fmtNum(r.oiPcr, 2));
+          // Colour by the DIFFERENCE, never by the ratio's position against
+          // 1.0. The difference is the valid directional read and is what the
+          // engine signals on, so the cell can no longer contradict the Signal
+          // column: green here always means the same thing as a BUY (CE), red
+          // the same as a SELL (PE).
+          const tone = r.diff >= 0 ? 'bull' : 'bear';
+          if (r.oiPcr == null) {
+            const note = r.oiPcrState === 'unwinding' ? 'unwind' : 'mixed';
+            return el('td', { class: `mono dim ${tone}`, title: r.oiPcrState === 'unwinding'
+                ? 'Both sides unwinding — a ratio of two negatives is not a PCR. Direction is taken from Difference (PE−CE).'
+                : 'One side building while the other unwinds — the ratio would be negative and is not a PCR. Direction is taken from Difference (PE−CE).' }, note);
+          }
+          return el('td', { class: `mono ${tone}`, style: { fontWeight: '600' } }, fmtNum(r.oiPcr, 2));
         } },
         { key: 'signalRank', label: 'Signal',
           render: r => {
