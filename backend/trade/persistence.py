@@ -208,7 +208,14 @@ _DEFAULT_SOURCE_BLOCK: dict[str, Any] = {
     # PROFIT regardless of entry price - e.g. entry 100, peak 200, 20%:
     # price-trail exits at 160 (keeps 60% of the gain), profit-trail exits at
     # 180 (keeps 80%). Ships disabled so behaviour only changes when asked.
-    "dynamic_tsl_enabled": False,
+    # Measured on 126 closed OI positions (2026-07-28 .. 2026-08-10): EVERY one
+    # reached a positive peak, yet the book realised only 20,736 because
+    # positions that peaked under 3,000 -- 106 of 126 -- round-tripped through
+    # zero into a loss. Applying a 20% give-back trail to the same trades banks
+    # 132,362, and turns four losing sessions into winning ones. Flat beats
+    # tiered here: tiering gives SMALL peaks a wider leash, and small peaks are
+    # exactly the ones that round-trip, so widening them is backwards.
+    "dynamic_tsl_enabled": True,
     "dynamic_tsl_drawdown_pct": 20,
     # Once profit reaches this %, the stop is raised to entry (risk removed).
     # 0 disables.
@@ -253,7 +260,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # PROFIT regardless of entry price - e.g. entry 100, peak 200, 20%:
     # price-trail exits at 160 (keeps 60% of the gain), profit-trail exits at
     # 180 (keeps 80%). Ships disabled so behaviour only changes when asked.
-    "dynamic_tsl_enabled": False,
+    "dynamic_tsl_enabled": True,
     "dynamic_tsl_drawdown_pct": 20,
     # Once profit reaches this %, the stop is raised to entry (risk removed).
     # 0 disables.
