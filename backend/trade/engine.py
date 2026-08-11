@@ -146,6 +146,9 @@ def _evaluate_one_exit(
     # winner because it ignores the entry price.
     if config.get("dynamic_tsl_enabled") and peak_profit > 0:
         dd = float(config.get("dynamic_tsl_drawdown_pct") or 0)
+        if config.get("dynamic_tsl_levels_enabled"):
+            dd = float(_tier_value(config.get("dynamic_tsl_levels"),
+                                   peak_profit, "drawdown_pct", dd) or 0)
         if dd > 0 and cur_profit <= peak_profit * (1.0 - dd / 100.0):
             _close(position, "exit_dynamic_tsl", ltp, b)
             return
@@ -155,6 +158,11 @@ def _evaluate_one_exit(
     # a reversal extends. e.g. 80% => give back at most ~20% of the peak.
     if config.get("peak_trail_enabled") and hwm > entry_price:
         pct = float(config.get("peak_trail_pct") or 0)
+        if config.get("peak_trail_levels_enabled"):
+            # tiers are keyed on peak PROFIT even though this exit is
+            # price-based, so both ladders are configured in the same units
+            pct = float(_tier_value(config.get("peak_trail_levels"),
+                                    peak_profit, "trail_pct", pct) or 0)
         if pct > 0 and ltp <= hwm * (pct / 100.0):
             _close(position, "exit_trail", ltp, b)
             return
@@ -1048,6 +1056,43 @@ def _lot_size(instrument: str) -> int:
 
 
 # ── Time helpers ──────────────────────────────────────────────────────
+
+
+def _tier_value(levels, peak_profit, key, fallback):
+    """Resolve a tiered exit parameter from the peak PROFIT reached.
+
+    levels is a list of dicts, each with "min_peak_profit" and `key`. The
+    highest threshold at or below peak_profit wins. Anything malformed is
+    skipped rather than raising -- a bad config entry must not stop an exit
+    from being evaluated -- and if nothing matches, the flat value is used.
+
+    Measured note (126 closed OI positions, 2026-07-28..08-10): every tiered
+    ladder tested came in BELOW a flat 20% give-back. Peaks under 3,000 were
+    106 of the 126 and round-tripped through zero into a loss, so a ladder that
+    gives SMALL peaks a wider leash is backwards. If tiering is used at all, it
+    should tighten as the peak shrinks, which is how the shipped defaults are
+    ordered.
+    """
+    if not levels:
+        return fallback
+    best_floor, best_val = None, None
+    try:
+        for lv in levels:
+            if not isinstance(lv, dict):
+                continue
+            try:
+                floor = float(lv.get("min_peak_profit", 0) or 0)
+                val = lv.get(key)
+                if val is None:
+                    continue
+                val = float(val)
+            except (TypeError, ValueError):
+                continue
+            if peak_profit >= floor and (best_floor is None or floor > best_floor):
+                best_floor, best_val = floor, val
+    except TypeError:          # levels not iterable
+        return fallback
+    return best_val if best_val is not None else fallback
 
 
 def _parse_hhmm(value: str) -> dt_time:

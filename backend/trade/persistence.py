@@ -208,15 +208,33 @@ _DEFAULT_SOURCE_BLOCK: dict[str, Any] = {
     # PROFIT regardless of entry price - e.g. entry 100, peak 200, 20%:
     # price-trail exits at 160 (keeps 60% of the gain), profit-trail exits at
     # 180 (keeps 80%). Ships disabled so behaviour only changes when asked.
-    # Measured on 126 closed OI positions (2026-07-28 .. 2026-08-10): EVERY one
-    # reached a positive peak, yet the book realised only 20,736 because
-    # positions that peaked under 3,000 -- 106 of 126 -- round-tripped through
-    # zero into a loss. Applying a 20% give-back trail to the same trades banks
-    # 132,362, and turns four losing sessions into winning ones. Flat beats
-    # tiered here: tiering gives SMALL peaks a wider leash, and small peaks are
-    # exactly the ones that round-trip, so widening them is backwards.
-    "dynamic_tsl_enabled": True,
+    "dynamic_tsl_enabled": False,
     "dynamic_tsl_drawdown_pct": 20,
+    # Tiered ladders keyed on the peak PROFIT reached. Each overrides its
+    # flat parameter above when its *_levels_enabled flag is on, and each
+    # carries its PARENT'S convention: trail_pct is a FLOOR (% of peak
+    # retained), drawdown_pct is the GIVE-BACK. They are not
+    # interchangeable and a ladder pasted into the wrong key inverts the
+    # exit.
+    #
+    # Measured on 126 closed OI positions: every tiered scheme tested came
+    # in below a flat 20% give-back, so these ship DISABLED. The ordering
+    # tightens as the peak shrinks, because peaks under 3,000 were 106 of
+    # the 126 and are the ones that round-trip into a loss.
+    "peak_trail_levels_enabled": False,
+    "peak_trail_levels": [
+        {"min_peak_profit": 6000, "trail_pct": 75},
+        {"min_peak_profit": 3000, "trail_pct": 80},
+        {"min_peak_profit": 1000, "trail_pct": 85},
+        {"min_peak_profit": 0,    "trail_pct": 88},
+    ],
+    "dynamic_tsl_levels_enabled": False,
+    "dynamic_tsl_levels": [
+        {"min_peak_profit": 6000, "drawdown_pct": 25},
+        {"min_peak_profit": 3000, "drawdown_pct": 20},
+        {"min_peak_profit": 1000, "drawdown_pct": 15},
+        {"min_peak_profit": 0,    "drawdown_pct": 12},
+    ],
     # Once profit reaches this %, the stop is raised to entry (risk removed).
     # 0 disables.
     "breakeven_trigger_pct": 0,
@@ -260,8 +278,33 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # PROFIT regardless of entry price - e.g. entry 100, peak 200, 20%:
     # price-trail exits at 160 (keeps 60% of the gain), profit-trail exits at
     # 180 (keeps 80%). Ships disabled so behaviour only changes when asked.
-    "dynamic_tsl_enabled": True,
+    "dynamic_tsl_enabled": False,
     "dynamic_tsl_drawdown_pct": 20,
+    # Tiered ladders keyed on the peak PROFIT reached. Each overrides its
+    # flat parameter above when its *_levels_enabled flag is on, and each
+    # carries its PARENT'S convention: trail_pct is a FLOOR (% of peak
+    # retained), drawdown_pct is the GIVE-BACK. They are not
+    # interchangeable and a ladder pasted into the wrong key inverts the
+    # exit.
+    #
+    # Measured on 126 closed OI positions: every tiered scheme tested came
+    # in below a flat 20% give-back, so these ship DISABLED. The ordering
+    # tightens as the peak shrinks, because peaks under 3,000 were 106 of
+    # the 126 and are the ones that round-trip into a loss.
+    "peak_trail_levels_enabled": False,
+    "peak_trail_levels": [
+        {"min_peak_profit": 6000, "trail_pct": 75},
+        {"min_peak_profit": 3000, "trail_pct": 80},
+        {"min_peak_profit": 1000, "trail_pct": 85},
+        {"min_peak_profit": 0,    "trail_pct": 88},
+    ],
+    "dynamic_tsl_levels_enabled": False,
+    "dynamic_tsl_levels": [
+        {"min_peak_profit": 6000, "drawdown_pct": 25},
+        {"min_peak_profit": 3000, "drawdown_pct": 20},
+        {"min_peak_profit": 1000, "drawdown_pct": 15},
+        {"min_peak_profit": 0,    "drawdown_pct": 12},
+    ],
     # Once profit reaches this %, the stop is raised to entry (risk removed).
     # 0 disables.
     "breakeven_trigger_pct": 0,
@@ -285,6 +328,8 @@ PER_SOURCE_KEYS = (
     "trailing_sl_enabled", "trailing_sl_trigger_pct", "trailing_sl_step_pct",
     "target_enabled", "target_pct", "peak_trail_enabled", "peak_trail_pct",
     "dynamic_tsl_enabled", "dynamic_tsl_drawdown_pct", "breakeven_trigger_pct",
+    "peak_trail_levels_enabled", "peak_trail_levels",
+    "dynamic_tsl_levels_enabled", "dynamic_tsl_levels",
     "time_exit_enabled", "time_exit_at", "no_entry_after",
 )
 

@@ -72,12 +72,73 @@ Evaluated each tick in `_evaluate_one_exit`:
 | # | rule | condition |
 |---|------|-----------|
 | 0 | **Forced** (manual / EOD square-off) | checked first, before any data gate |
-| 1 | **Peak trail** | in profit and premium retraces below `peak_trail_pct`% of its peak |
+| 1a | **Break-even** | profit reaches `breakeven_trigger_pct` → stop raised to entry. Latched, never re-armed. State only |
+| 1b | **Dynamic TSL** (profit trail) | `current_profit ≤ peak_profit × (1 − dynamic_tsl_drawdown_pct/100)` |
+| 1c | **Peak trail** (price trail) | in profit and LTP retraces below `peak_trail_pct`% of its peak |
 | 2 | **Time exit** | now ≥ `time_exit_at` |
 | 3 | **Counter-crossover** | the opposite signal on the position's **own source** fires (SELL closes a CE, BUY closes a PE); the entries pass may re-open the new side the same tick |
 | 4 | **Stop loss** | LTP ≤ frozen `sl_price` (`stop_loss_pct` below entry) |
 | 5 | **Target** | LTP ≥ frozen `target_price` (`target_pct` above entry) |
 | 6 | **Trailing SL** | ratchets the stop up as profit grows (state only, no exit this tick) |
+
+### The two trails are not the same thing
+
+`dynamic_tsl` trails the peak **profit**; `peak_trail` trails the peak
+**price**. On a large winner they differ materially, because the price trail
+ignores the entry:
+
+> entry 100, peak 200, parameter 20 →
+> price trail exits at **160** (keeps 60% of the gain);
+> profit trail exits at **180** (keeps 80%).
+
+Their parameters also use **opposite conventions**, which is the easiest thing
+in this file to get backwards:
+
+| key | meaning | 20 means |
+|---|---|---|
+| `peak_trail_pct` | FLOOR, as % of peak retained | give back up to **80%** |
+| `dynamic_tsl_drawdown_pct` | the GIVE-BACK itself | give back **20%** |
+
+### Tiered levels
+
+Either trail can use a ladder keyed on the peak **profit** reached instead of a
+single flat number:
+
+```json
+"dynamic_tsl_levels_enabled": true,
+"dynamic_tsl_levels": [
+  {"min_peak_profit": 6000, "drawdown_pct": 25},
+  {"min_peak_profit": 3000, "drawdown_pct": 20},
+  {"min_peak_profit": 1000, "drawdown_pct": 15},
+  {"min_peak_profit": 0,    "drawdown_pct": 12}
+]
+```
+
+`peak_trail_levels` is the same shape with `trail_pct`, and each tier carries
+its parent's convention so a ladder cannot be pasted into the wrong key and
+silently invert. The highest threshold at or below the peak wins; order in the
+list does not matter. A malformed entry is skipped rather than raising, and a
+disabled, empty or unusable ladder falls back to the flat parameter.
+
+Both ship **disabled**.
+
+**The ladder must tighten as the peak shrinks.** Measured over 134 closed OI
+positions:
+
+| scheme | banked | vs actual |
+|---|---|---|
+| actual realised | 13,319 | — |
+| flat 20% give-back | 139,020 | +125,701 |
+| flat 15% | 144,556 | +131,237 |
+| flat 10% | 150,118 | +136,799 |
+| **shipped ladder** (tightens on small peaks) | **142,334** | **+129,015** |
+| ladder that widens on small peaks | 135,356 | +122,037 |
+
+Small peaks are the ones that round-trip through zero into a loss, so giving
+them a *wider* leash is backwards — that shape loses to a flat 20%, while the
+shipped shape beats it. Flat 10% scores highest of all and is still not
+recommended: a 10% give-back sits inside a single option's bid/ask spread, so
+it exits on quote bounce rather than on a reversal.
 
 ## Order placement — Paper vs Live
 
